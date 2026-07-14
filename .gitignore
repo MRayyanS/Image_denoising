@@ -4,10 +4,14 @@ __pycache__/
 
 # Data and local outputs (adjust names as needed)
 datasets/
-training_log.txt
 
 
 # IDEs
 .vscode/
 .idea/
 myenv/
+
+
+# specific files
+training_log.txt
+last_model_trained.pth
