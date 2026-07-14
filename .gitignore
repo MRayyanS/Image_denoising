@@ -2,17 +2,17 @@
 __pycache__/
 *.pyc
 
-# Data and local outputs (adjust names as needed)
-datasets/
-eval_results/
-other utility function/
-
 
 # IDEs
 .vscode/
 .idea/
 myenv/
 
+
+# Data and local outputs (adjust names as needed)
+datasets/
+eval_results/
+other utility function/
 
 # specific files
 training_log.txt
