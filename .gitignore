@@ -4,6 +4,7 @@ __pycache__/
 
 # Data and local outputs (adjust names as needed)
 datasets/
+eval_results/
 
 
 # IDEs
