@@ -1,0 +1,13 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Data and local outputs (adjust names as needed)
+datasets/
+training_log.txt
+
+
+# IDEs
+.vscode/
+.idea/
+myenv/
