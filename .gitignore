@@ -5,6 +5,7 @@ __pycache__/
 # Data and local outputs (adjust names as needed)
 datasets/
 eval_results/
+other utility function/
 
 
 # IDEs
@@ -16,3 +17,5 @@ myenv/
 # specific files
 training_log.txt
 last_model_trained.pth
+
+
