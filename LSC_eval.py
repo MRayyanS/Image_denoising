@@ -5,6 +5,10 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 
+
+from torchvision.utils import make_grid
+import math
+
 from dataset_loaders import get_dataloaders
 from model_architectures import *
 from unfolded_denoiser_modules import *
@@ -241,6 +245,39 @@ def plot_im_from_matrix(matrix, title):
 
 
 
+def visualize_phi(phi, nrow=None, padding=1, normalize=False, pad_value=1):
+    """
+    Reshape a (p^2 x K) matrix into a grid of pxp patches.
+
+    Args:
+        phi: torch.Tensor of shape (p^2, K)  -- e.g. 81 x 128
+        nrow: number of images per row in the grid (default: ceil(sqrt(K)))
+        padding: pixels of padding between patches
+        normalize: if True, scale each patch to [0, 1] for display
+        pad_value: value used for padding pixels
+
+    Returns:
+        grid: torch.Tensor of shape (1, H, W) -- the final grid image
+    """
+    if not torch.is_tensor(phi):
+        phi = torch.as_tensor(phi)
+
+    p2, K = phi.shape
+    p = int(math.isqrt(p2))
+    assert p*p == p2, f"p^2={p2} is not a perfect square"
+
+    # (p^2, K) -> (K, p^2) -> (K, 1, p, p)   [1 channel, p x p patch]
+    patches = phi.t().reshape(K, 1, p, p)
+
+    if nrow is None:
+        nrow = int(math.ceil(math.sqrt(K)))
+
+    grid = make_grid(patches, nrow=nrow, padding=padding,
+                      normalize=normalize, pad_value=pad_value)
+
+    return grid  # shape: (3, H, W) since make_grid replicates to 3 channels
+
+
 
 def main(args):
     device = torch.device('mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu')
@@ -248,11 +285,11 @@ def main(args):
 
     # Load checkpoint and extract hyperparameters
     checkpoint = load_checkpoint(args.model_path, device)
-    token_dim = checkpoint.get('token_dim', 128)
-    patch_dim = checkpoint.get('patch_dim', 7)
+    token_dim  = checkpoint.get('token_dim', 128)
+    patch_dim  = checkpoint.get('patch_dim', 7)
     train_iter = checkpoint.get('train_iter', 1)
-    patch_dim = checkpoint.get('patch_dim', 7)
-    im_color = checkpoint.get('im_color', 'color')
+    patch_dim  = checkpoint.get('patch_dim', 7)
+    im_color   = checkpoint.get('im_color', 'color')
 
     algo_params = AlgoParams(**checkpoint.get('algo_params', {}))
 
@@ -290,7 +327,6 @@ def main(args):
     print(f'Using device: {device}')
     cov_matrix_comparison(model, test_loader_fixed_noise, 'cpu')
 
-
     model.to(device)
     psnr_vs_iters = eval_fixed_noise_varying_iters(
         model=model, 
@@ -322,7 +358,7 @@ def main(args):
 
     # Subplot 1: PSNR vs Iterations
     ax1.plot(args.iter_list, psnr_vs_iters, marker='o', color='b', linestyle='-', linewidth=2)
-    ax1.set_title(fr"PSNR vs. Number of Iterations (Fixed $\sigma$ = {args.noise_sigma})")
+    ax1.set_title(rf"PSNR vs. Number of Iterations (Fixed $\sigma$ = {args.noise_sigma})")
     ax1.set_xlabel("Iterations")
     ax1.set_ylabel("Average PSNR (dB)")
     ax1.grid(True, linestyle='--', alpha=0.7)
@@ -352,15 +388,6 @@ def main(args):
         output_path=visual_path
     )
 
-    # ---------------------------------------------------------
-    # Figure 3: CDF plots
-    # ---------------------------------------------------------    
-    # add functionality to plot the CDF plots
-
-    cdf_psnr_values = eval_fixed_iter(model, test_loader_fixed_noise, algo_params=algo_params, device=device)
-    cdf_path = os.path.join(args.output_dir, 'psnr_CDF.pdf')
-    plot_psnr_CDF(cdf_psnr_values, title='CDF plot for PSNR values',save_path=cdf_path)
-
     plt.show()
 
 
@@ -373,7 +400,6 @@ if __name__ == '__main__':
     parser.add_argument('--model-path', type=str, default=test_model_path,
                         help='Path to the saved model checkpoint.')
     parser.add_argument('--test-dir', type=str, default=TEST_PATH, help='Test directory.')
-    parser.add_argument('--batch-size', type=int, default=8, help='Batch size for evaluation.')
     
     # Defaults for curves
     parser.add_argument('--noise-sigma', type=int, default=default_sigma, help='Fixed noise level for the varying iterations plot.')

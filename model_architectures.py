@@ -73,28 +73,6 @@ class Patch_reconstructor(nn.Module):
         x   = F.fold(x, output_size=(H, W), kernel_size=self.patch_dim, padding=self.patch_dim//2, stride=1)  # Reconstruct the image from patches
 
         return x / mask
-
-
-
-
-# # Convolutional feature extraction and reconstruction blocks for image denoising
-# class Conv_feature_extractor(nn.Module):
-#     def __init__(self, token_dim=64, patch_dim=7, im_color: str = 'color'):
-#         super(Conv_feature_extractor, self).__init__()
-
-#         self.in_ch = 3 if im_color == 'color' else 1
-
-#         # Super crucial to have larger filter size in the first layer to capture more context
-#         self.conv_block = nn.Sequential(
-#             nn.Conv2d(self.in_ch, 64, kernel_size=patch_dim, bias=False, padding='same', padding_mode='replicate'),
-#             nn.GELU(),
-#             nn.Conv2d(64, token_dim, kernel_size=1, bias=False)
-#             # ExpCompBlock(in_ch=token_dim, middle_ch=128, num_modules=2)
-#         )
-
-#     def forward(self, x):
-#         x = self.conv_block(x)
-#         return x
     
 
 

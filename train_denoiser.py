@@ -214,7 +214,7 @@ if __name__ == '__main__':
     print(f"✓ Batch size: {batch_size}, Training batches per epoch: {len(train_loader)}, Total images:{len(train_loader)*batch_size}")
     
     num_epochs = 250
-    learning_rate = 0.0000125   #0.00125
+    learning_rate = 0.00125   #0.00125
     
     # optimizer = optim.Adam(training_model.parameters(), lr=learning_rate)
     # scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.9, patience=5, min_lr=1e-5)

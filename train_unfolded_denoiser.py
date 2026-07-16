@@ -262,7 +262,7 @@ def profile_unrolled_denoising_model(model: Any, algo_params, sample_batch_loade
 denoiser_learning_mode = 'im_out'
 
 # to initialize with a pre-learned model or start from scratch
-pre_learned_init = True
+pre_learned_init = False
 
 
 if __name__ == '__main__':
@@ -280,15 +280,15 @@ if __name__ == '__main__':
         device = torch.device('mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Using device: {device}")
 
-        token_dim = 128
+        token_dim = 256
         patch_dim = 7
-        train_iter = 11
+        train_iter = 3
 
         algo_params = AlgoParams(
-            denoiser_type = 'rnn', # options = 'lsc', 'rnn'
+            denoiser_type = 'lsc', # options = 'lsc', 'rnn'
             algo='new_ISTA', # options = 'FLIPS', 'ISTA' 
             num_iter=train_iter,
-            activation='relu',  # 'relu',
+            activation='leaky_relu',  # 'relu',
             normalize_phi=True
             )
 
@@ -308,14 +308,14 @@ if __name__ == '__main__':
         training_model.rnn.train_iter = train_iter
 
         # define loss criterion to train the model
-        criterion = nn.MSELoss()
+        criterion = nn.HuberLoss() # nn.MSELoss() , nn.HuberLoss()
 
         # printing some basic info
         print(f'Starting training... using device: {device}')
         print(f"✓ Batch size: {batch_size}, Training batches per epoch: {len(train_loader)}, Total images:{len(train_loader)*batch_size}")
         
-        num_epochs = 200
-        learning_rate = 0.00025 # 0.00125
+        num_epochs = 10
+        learning_rate = 0.00125 # 0.00125
 
         optimizer = optim.AdamW(training_model.parameters(), lr=learning_rate)
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
