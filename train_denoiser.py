@@ -17,6 +17,7 @@ import copy
 
 
 from utils import *
+# from model_architectures import *
 from model_architectures import *
 
 
@@ -57,7 +58,7 @@ denoiser_learning_mode = 'im_out'
 # denoiser_learning_mode = 'noise_out'
 
 # initialize model from a pre-learned model
-pre_learned_init = True  # False or True
+pre_learned_init = False  # False or True
 
 
 # create dataloaders
@@ -180,128 +181,160 @@ def test(model, learning_mode):
 # ============================================================================
 
 if __name__ == '__main__':
+
+     # --- LOG FILE DIRECTORY  ---
+    log_filename = "training_log.txt"
+    log_file = open(log_filename, "w", encoding="utf-8")
     
-    # define the model to be trained
-    patch_dim = 9
-    token_dim = 256
+    # Backup original stdout to restore it later if needed
+    original_stdout = sys.stdout 
+    # Prints to both terminal and the file
+    sys.stdout = Tee(sys.stdout, log_file)
 
-    middle_ch = 4
-
-    mlp_middle_dim = 32
-    num_att_heads = 1
-    att_emb_dim = 6
-    att_out_dim = token_dim
-
-    num_modules = 3
-    unrolled_iter = 1*np.ones(num_modules, dtype=int)
-    next_update_epoch = 25
-
-    training_model = Conv_only_denoiser(patch_dim=patch_dim, token_dim=token_dim, middle_ch=middle_ch, num_modules=num_modules, unrolled_iter=unrolled_iter, im_color=im_color).to(device)
-
-    # load a pre-learned model if any
-    if pre_learned_init == True:
-        prev_checkpoint = load_checkpoint('last_model_trained.pth' , device)
-        training_model.load_state_dict(prev_checkpoint['model_state_dict'])
-
-    # count and print the number of parameters
-    count_parameters(training_model)
-
-    # define loss criterion to train the model
-    criterion = nn.HuberLoss()  # nn.MSELoss()
-
-    # printing some basic info
-    print(f'Starting training... using device: {device}')
-    print(f"✓ Batch size: {batch_size}, Training batches per epoch: {len(train_loader)}, Total images:{len(train_loader)*batch_size}")
+    try:
+        device = torch.device('mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"Using device: {device}")
     
-    num_epochs = 250
-    learning_rate = 0.00125   #0.00125
-    
-    # optimizer = optim.Adam(training_model.parameters(), lr=learning_rate)
-    # scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.9, patience=5, min_lr=1e-5)
-
-    optimizer = optim.AdamW(training_model.parameters(), lr=learning_rate, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
-
-    train_loss_history  = []
-    val_loss_history    = []
-    
-    best_mean_psnr = 0.0
-    best_epoch = -1
-    batches_per_epoch = len(train_loader)
-    best_model_state_dict = copy.deepcopy(training_model.state_dict())
-    
-    for epoch in range(num_epochs):
-        # 1. Train the model - and update the train loss and confusion matrix
-        train(training_model, epoch, denoiser_learning_mode, train_loss_history)
-
-        # 2. evealuate on validation data and compute val_loss, val_acc, and confusion_matrix
-        val_loss, PSNR_values = validate(training_model, denoiser_learning_mode)
-
-        val_loss_history.append(val_loss)
-        mean_psnr = np.mean(PSNR_values)
-        print(f'Valid Loss: {val_loss:.8f} \n')
-        print(f'Validation PSNR -- mean: {mean_psnr:.2f} dB, median: {np.median(PSNR_values):.2f} dB \n')
-
-        scheduler.step()
-
-        if  mean_psnr > best_mean_psnr:
-            best_mean_psnr = mean_psnr
-            best_epoch = epoch
-            best_model_state_dict = copy.deepcopy(training_model.state_dict())
-            print(f'Best model weights saved with mean PSNR: {best_mean_psnr:.2f} dB at epoch: {best_epoch}')
+        # define the model to be trained
+        patch_dim = 9
+        token_dim = 32
+        att_emb_dim = 4
+        att_out_dim = 16
+        mlp_middle_dim = att_out_dim
+        num_att_heads = 1
+        num_modules = 5
+        pixel_shuffle_factor = 3
         
-        print(f'Best mean PSNR: {best_mean_psnr:.2f} dB, best PSNR at epoch = {best_epoch}')
-        print('-' * 60)
+        training_model = MHA_Vision_Transformer_Denoiser(
+            patch_dim=patch_dim,
+            token_dim=token_dim,
+            att_emb_dim=att_emb_dim,
+            att_out_dim=att_out_dim,
+            mlp_middle_dim=mlp_middle_dim,
+            num_att_heads=num_att_heads,
+            num_modules=num_modules,
+            pixel_shuffle_factor = pixel_shuffle_factor,
+            im_color=im_color
+            ).to(device)
+
+
+        # load a pre-learned model if any
+        if pre_learned_init == True:
+            prev_checkpoint = load_checkpoint('last_model_trained.pth' , device)
+            training_model.load_state_dict(prev_checkpoint['model_state_dict'])
+
+        # count and print the number of parameters
+        count_parameters(training_model)
+
+        # define loss criterion to train the model
+        criterion = nn.HuberLoss()  # nn.MSELoss()
+
+        # printing some basic info
+        print(f'Starting training... using device: {device}')
+        print(f"✓ Batch size: {batch_size}, Training batches per epoch: {len(train_loader)}, Total images:{len(train_loader)*batch_size}")
         
+        num_epochs = 250
+        learning_rate = 0.00125   #0.00125
+        
+        optimizer = optim.AdamW(training_model.parameters(), lr=learning_rate, weight_decay=1e-4)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
 
-    print(f'Training completed!')
-    print('-' * 80)
-    
-    # Load the best model weights before evaluation and saving
-    best_model = Conv_only_denoiser(patch_dim=patch_dim, token_dim=token_dim, middle_ch=middle_ch, num_modules=num_modules, unrolled_iter=unrolled_iter, im_color=im_color).to(device)
+        train_loss_history  = []
+        val_loss_history    = []
+        
+        best_mean_psnr = 0.0
+        best_epoch = -1
+        batches_per_epoch = len(train_loader)
+        best_model_state_dict = copy.deepcopy(training_model.state_dict())
+        
+        for epoch in range(num_epochs):
+            # 1. Train the model - and update the train loss and confusion matrix
+            train(training_model, epoch, denoiser_learning_mode, train_loss_history)
 
-    best_model.load_state_dict(best_model_state_dict)
+            # 2. evealuate on validation data and compute val_loss, val_acc, and confusion_matrix
+            val_loss, PSNR_values = validate(training_model, denoiser_learning_mode)
 
-    # Evaluate the best model on the test set
-    test_loss, test_PSNRvalues = test(best_model, denoiser_learning_mode)
-    
-    print('-' * 80)
-    print(f'Best Val PSNR: {best_mean_psnr:.2f} dB, at epoch: {best_epoch}')
-    print(f'Final Test PSNR: {np.mean(test_PSNRvalues):.2f} dB')
-    print('-' * 80)
+            val_loss_history.append(val_loss)
+            mean_psnr = np.mean(PSNR_values)
+            print(f'Valid Loss: {val_loss:.8f} \n')
+            print(f'Validation PSNR -- mean: {mean_psnr:.2f} dB, median: {np.median(PSNR_values):.2f} dB \n')
+
+            scheduler.step()
+
+            if  mean_psnr > best_mean_psnr:
+                best_mean_psnr = mean_psnr
+                best_epoch = epoch
+                best_model_state_dict = copy.deepcopy(training_model.state_dict())
+                print(f'Best model weights saved with mean PSNR: {best_mean_psnr:.2f} dB at epoch: {best_epoch}')
+            
+            print(f'Best mean PSNR: {best_mean_psnr:.2f} dB, best PSNR at epoch = {best_epoch}')
+            print('-' * 60)
+            
+
+        print(f'Training completed!')
+        print('-' * 80)
+        
+        # Load the best model weights before evaluation and saving
+        best_model =  MHA_Vision_Transformer_Denoiser(
+            patch_dim=patch_dim,
+            token_dim=token_dim,
+            att_emb_dim=att_emb_dim,
+            att_out_dim=att_out_dim,
+            mlp_middle_dim=mlp_middle_dim,
+            num_att_heads=num_att_heads,
+            num_modules=num_modules,
+            pixel_shuffle_factor = 3,
+            im_color=im_color
+            ).to(device)
+        
+        best_model.load_state_dict(best_model_state_dict)
+
+        # Evaluate the best model on the test set
+        test_loss, test_PSNRvalues = test(best_model, denoiser_learning_mode)
+        
+        print('-' * 80)
+        print(f'Best Val PSNR: {best_mean_psnr:.2f} dB, at epoch: {best_epoch}')
+        print(f'Final Test PSNR: {np.mean(test_PSNRvalues):.2f} dB')
+        print('-' * 80)
 
 
-    # ============================================================================
-    # Saving everything
-    # ============================================================================
+        # ============================================================================
+        # Saving everything
+        # ============================================================================
 
-    # Define the path for the results file
-    results_path = 'last_model_trained.pth'
+        # Define the path for the results file
+        results_path = 'last_model_trained.pth'
 
-    # Create a dictionary containing all the data you want to preserve
-    training_results = {
-        'epoch_trained': epoch + 1,
-        'learning_rate': learning_rate,
-        'token_dim': token_dim,
-        'patch_dim': patch_dim,
-        'middle_ch': middle_ch,
-        'num_modules': num_modules,
-        'unrolled_iter': unrolled_iter,
-        'im_color': im_color,
-        'model_state_dict': best_model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'train_loss_history': train_loss_history,
-        'val_loss_history': val_loss_history,
-        'best_val_psnr': best_mean_psnr,
-    }
+        # Create a dictionary containing all the data you want to preserve
+        training_results = {
+            'epoch_trained': epoch + 1,
+            'learning_rate': learning_rate,
+            'token_dim': token_dim,
+            'patch_dim': patch_dim,
+            'num_modules': num_modules,
+            'im_color': im_color,
+            'model_state_dict': best_model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'train_loss_history': train_loss_history,
+            'val_loss_history': val_loss_history,
+            'best_val_psnr': best_mean_psnr,
+        }
 
-    # Save everything into one file
-    torch.save(training_results, results_path)
+        # Save everything into one file
+        torch.save(training_results, results_path)
 
-    print(f"\n✓ All training results and best model saved to: {results_path}")
+        print(f"\n✓ All training results and best model saved to: {results_path}")
 
-    # plotting the loss curves and PSNR distribution
-    plot_loss_curves(train_loss_history, val_loss_history, batches_per_epoch)
+        # plotting the loss curves and PSNR distribution
+        plot_loss_curves(train_loss_history, val_loss_history, batches_per_epoch)
+
+
+    finally:
+        # --- CLEAN UP ---
+        # This guarantees the file closes properly even if the script crashes midway
+        sys.stdout = original_stdout
+        log_file.close()
+        print(f"\n✓ Complete log history written to {log_filename}")
 
 
 

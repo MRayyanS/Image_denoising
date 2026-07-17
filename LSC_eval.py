@@ -11,7 +11,6 @@ import math
 
 from dataset_loaders import get_dataloaders
 from model_architectures import *
-from unfolded_denoiser_modules import *
 from utils import *
 
 # Default paths

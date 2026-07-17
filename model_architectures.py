@@ -1,3 +1,4 @@
+from math import tau
 from typing import Any
 
 import torch
@@ -9,61 +10,124 @@ from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import datasets, transforms
 
 import numpy as np
+import scipy
 import matplotlib.pyplot as plt
 
 from utils import *
-from conv_modules import *
 
-import time
 
+
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+class AlgoParams:
+    def __init__(self, denoiser_type='lsc', algo='ISTA', num_iter=3, activation='relu', normalize_phi=True):
+        self.denoiser_type = denoiser_type
+        self.algo = algo
+        self.num_iter = num_iter
+        self.activation = activation
+        self.normalize_phi = normalize_phi
+
+
+
+def activation_function(x, tau, activation='relu'):
+    if activation == 'soft_threshold':
+        return torch.sign(x) * F.relu(torch.abs(x) - tau)
+    elif activation == 'leaky_relu':
+        return F.leaky_relu(x - tau, negative_slope=0.125)
+    else:
+        return F.relu(x - tau)
+  
 
 # ==================================================================================================
-# Patch and conv feature extraction
+# modules for unfolded sparse coding denoising
 # ==================================================================================================
+
+class Phi_op(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        # Define the forward linear map phi using a 1x1 convolution
+        # bias must be False for the mathematical adjoint property to hold
+        
+        self.phi = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
+        self.init_with_dct()
+        self.normalize_phi()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Applies the forward mapping: phi @ x"""
+        return self.phi(x)
+
+    def phiadj(self, y: torch.Tensor) -> torch.Tensor:
+        """Applies the adjoint mapping: phi_adjoint @ y
+        
+        y should have the shape [B, out_channels, H, W]
+        Returns a tensor of shape [B, in_channels, H, W]
+        """
+        # conv_transpose2d uses the transpose of the weight matrix
+        return F.conv_transpose2d(y, self.phi.weight)
+
+    def phiadj_phi(self, x: torch.Tensor) -> torch.Tensor:
+        """Applies the combined mapping: phi_adjoint @ phi @ x
+        
+        x should have the shape [B, in_channels, H, W]
+        Returns a tensor of shape [B, in_channels, H, W]
+        """
+        return self.phiadj(self.forward(x))
+    
+    def normalize_phi(self):
+        """Normalizes the phi weights along dim=0 (columns/atoms mapping to patch features)"""
+        with torch.no_grad():
+            self.phi.weight.copy_(torch.nn.functional.normalize(self.phi.weight, p=2, dim=0))
+
+    def init_with_dct(self):
+        """Initializes phi.weight with DCT basis"""
+        
+        out_ch = self.phi.out_channels
+        in_ch = self.phi.in_channels  # This is your token_dim
+        
+        # 1. Generate an identity matrix and apply the built-in orthogonal DCT
+        dct_matrix = scipy.fft.dct(np.eye(max(in_ch, out_ch)), norm='ortho', axis=0)
+        
+        # 2. Slice the first out_channels rows as columns of phi
+        dct_sliced = dct_matrix[:out_ch, :in_ch]
+        
+        with torch.no_grad():
+            self.phi.weight.copy_(torch.from_numpy(dct_sliced).float().unsqueeze(-1).unsqueeze(-1))
+
 
 # Initial patch based feature extraction
-class Patch_feature_extractor(nn.Module):
-    def __init__(self, patch_dim=7, num_ch=128, im_color: str = 'color'):
+class Patch_feature_extraction(nn.Module):
+    def __init__(self, patch_dim=7):
         super().__init__()
 
-        self.token_dim = 3*patch_dim**2 if im_color == 'color' else patch_dim**2
         self.patch_dim = patch_dim
-
-        # The analysis operator that maps the unfolded patches to a lower-dimensional embedding space
-        # reminiscent of 'phiadj' operator in canonical sparse coding algorithms
-        self.analysis_op = nn.Sequential(
-            nn.Conv2d(self.token_dim, num_ch, kernel_size=1, padding='same', bias=False)
-        )
  
-    def forward(self, xin):
+    def forward(self, phi_op, xin):
         B, C, H, W = xin.size()
 
         # extract overlapping patches to create initial tokens
         x = F.unfold(xin, kernel_size=self.patch_dim, padding=self.patch_dim//2, stride=1)  # Shape: (batch_size, channels*patch_dim^2, num_patches)
         x = x.view(B, -1, H, W)  # Reshape to (batch_size, channels*patch_dim^2, H, W)
 
-        x = self.analysis_op(x)
+        mean_feature = torch.mean(x, dim=[2,3], keepdim=True)
+        x = x - mean_feature
+        x   = phi_op.phiadj(x)
 
-        return x
+        return x, mean_feature
 
 
 # Final recunstruction with patches
-class Patch_reconstructor(nn.Module):
-    def __init__(self, num_ch=128, patch_dim=7, im_color: str = 'color') -> None:
+class Patch_reconstruction(nn.Module):
+    def __init__(self, patch_dim=7) -> None:
         super().__init__()
 
-        self.token_dim = 3*patch_dim**2 if im_color == 'color' else patch_dim**2
         self.patch_dim = patch_dim
-
-        # reminiscent of the 'phi' operator in canonical sparse coding algorithms that maps the embedded features back to the patch space
-        self.synthesis_op = nn.Sequential(
-            nn.Conv2d(num_ch, self.token_dim, kernel_size=1, bias=False)
-        )
 
         # forward pass contains patch aggregation and averaging them to reconstruct the image
 
-    def forward(self, x):
-        x = self.synthesis_op(x)
+    def forward(self, phi_op, x, mean_feature):
+        x = phi_op(x)
+        x = x + mean_feature
 
         B, C, H, W = x.size()
         x = x.view(B, C, H*W)  # Reshape to (batch_size, channels*patch_dim^2, H*W)
@@ -71,349 +135,368 @@ class Patch_reconstructor(nn.Module):
         # put all the overlapping patches and average them to reconstruct the image
         mask = F.fold(torch.ones_like(x), output_size=(H, W), kernel_size=self.patch_dim, padding=self.patch_dim//2, stride=1)
         x   = F.fold(x, output_size=(H, W), kernel_size=self.patch_dim, padding=self.patch_dim//2, stride=1)  # Reconstruct the image from patches
-
-        return x / mask
-    
-
-
-# Convolutional feature extraction and reconstruction blocks for image denoising
-class Conv_feature_extractor(nn.Module):
-    def __init__(self, token_dim=64, patch_dim=7, im_color: str = 'color'):
-        super(Conv_feature_extractor, self).__init__()
-
-        self.in_ch = 3 if im_color == 'color' else 1
-
-        # Super crucial to have larger filter size in the first layer to capture more context
-        self.conv_block = nn.Sequential(
-            nn.Conv2d(self.in_ch, 32, kernel_size=5, bias=False, padding='same', padding_mode='replicate'),
-            nn.Conv2d(32, 64, kernel_size=3, bias=False, padding='same', padding_mode='replicate'),
-            nn.Conv2d(64, token_dim, kernel_size=1, bias=False)
-            # ExpCompBlock(in_ch=token_dim, middle_ch=128, num_modules=2)
-        )
-
-    def forward(self, x):
-        x = self.conv_block(x)
+        x = x / mask
         return x
+  
 
-
-# Final Convolutional reconstruction block
-class Conv_reconstructor(nn.Module):
-    def __init__(self, num_ch=128, patch_dim = 7, im_color: str = 'color') -> None:
+# Canonical LISTA RNN - unfolding of proximal gradient descent
+class SparseCoding_RNN(nn.Module):
+    def __init__(self, train_iter=3, token_dim=128):
         super().__init__()
 
-        self.out_ch = 3 if im_color == 'color' else 1
+        self.train_iter  = train_iter
+        self.gd_stepsize = nn.Parameter(torch.ones(1))
 
-        self.reconstructor = nn.Sequential(
-            # final linear operator
-            nn.Conv2d(num_ch, num_ch, kernel_size=1, bias=False), 
-            # depthwise conv replacing  averaging over patches 
-            nn.Conv2d(num_ch, num_ch, kernel_size=patch_dim, padding='same', groups=num_ch, bias=False, padding_mode='replicate'),
-            # final output layer to get back to 3 channels
-            nn.Conv2d(num_ch, 3, kernel_size=1, bias=False)
+        self.tau_mlp = nn.Sequential(
+            nn.Conv2d(token_dim, 32, kernel_size=1, bias=False),
+            nn.Conv2d(32, 128, kernel_size=1, bias=False), nn.ReLU(),
+            nn.Conv2d(128, 128, kernel_size=1, bias=False), nn.ReLU(),
+            nn.Conv2d(128, 1, kernel_size=1, bias=False)
         )
-
-    def forward(self, x):
-        x = self.reconstructor(x)
-        return x
-
-
-
-
-
-
-
-# ==================================================================================================
-#  Conv only models for Image restoration
-# ==================================================================================================
-
-
-class Conv_refinement_module(nn.Module):
-    def __init__(self, token_dim=64, middle_ch=128):
-        super().__init__()
-
-        self.conv_component = nn.Sequential(
-            nn.Conv2d(token_dim, token_dim, kernel_size=5, padding='same', bias=False, padding_mode='replicate', groups=token_dim),
-            nn.Conv2d(token_dim, middle_ch, kernel_size=1, bias=False),
-            # nn.GELU(),
-            # nn.Conv2d(middle_ch, middle_ch, kernel_size=7, padding='same', bias=False, padding_mode='replicate', groups=middle_ch),
-            nn.Conv2d(middle_ch, token_dim, kernel_size=1, bias=False),
-            nn.GELU(),
-            nn.Conv2d(token_dim, token_dim, kernel_size=5, padding='same', bias=False, padding_mode='replicate', groups=token_dim)
-        )
-
-        # self.mixer = nn.Sequential(
-        #     nn.Conv2d(2*token_dim, token_dim, kernel_size=1, bias=False)
-        # )
-    
-    def forward(self, xin, num_iter):
-        x = xin
-        for _ in range(num_iter):
-            x = self.conv_component(x)
         
-        # x = torch.cat([x, xin], dim=1)
-        # x = self.mixer(x)
-        return x 
 
+    def forward(self, phi_op, xin, algo_params: AlgoParams):
+        tau = self.tau_mlp(xin)
+
+        x = torch.zeros_like(xin)  # Initialize x with zeros, same shape as xin
+        if algo_params.algo == 'ISTA':
+            for iter in range(algo_params.num_iter if algo_params.num_iter is not None else self.train_iter):
+                x = x - self.gd_stepsize * (phi_op.phiadj_phi(x) - xin)
+                x = activation_function(x, tau, activation=algo_params.activation)
+
+        elif algo_params.algo == 'FLIPS':
+            G = - xin
+            for iter in range(algo_params.num_iter if algo_params.num_iter is not None else self.train_iter):
+                # Compute update directions for x and G
+                Dx = activation_function(x - G, tau, activation=algo_params.activation) - x
+                DG = phi_op.phiadj_phi(Dx)
+
+                # Compute FW-stepsize
+                numerator   = - torch.sum(G * Dx, dim = 1, keepdim=True) 
+                denominator =   torch.sum(DG * Dx, dim = 1, keepdim=True)
+                gamma = torch.clamp(numerator.div_(denominator.add_(1e-4)).add_(1e-3), min=0.0, max=1.0)
+
+                # Update x and G
+                if  iter == algo_params.num_iter - 1:
+                    x = x + gamma * Dx
+                else:
+                    x = x + gamma * Dx
+                    G = G + gamma * DG
+
+        elif algo_params.algo == 'new_ISTA':
+            for iter in range(algo_params.num_iter if algo_params.num_iter is not None else self.train_iter):
+                x = x + activation_function(x - self.gd_stepsize*(phi_op.phiadj_phi(x) + x - xin), tau, activation=algo_params.activation)
+                x = x + activation_function(x - self.gd_stepsize*(phi_op.phiadj_phi(x) + x - xin), tau, activation=algo_params.activation)
+        return x
     
-class Conv_refinement_Block(nn.Module):
-    def __init__(self, token_dim=64, middle_ch=128, num_modules = 3, unrolled_iter: list = [1, 1, 1]):
+
+class LSC_denoiser(nn.Module):
+    def __init__(self, patch_dim=7, token_dim=128, train_iter=3, im_color: str = 'color'):
         super().__init__()
 
-        self.num_modules = num_modules
-        self.unrolled_iter = unrolled_iter
+        self.patch_dim  = patch_dim
+        self.token_dim  = token_dim
 
-        self.refinement_modules = nn.ModuleList([
-            Conv_refinement_module(token_dim=token_dim, middle_ch=middle_ch) for _ in range(num_modules)
+        self.color_ch = 3 if im_color == 'color' else 1
+
+        self.phi_op = Phi_op(in_channels=self.token_dim, out_channels=self.color_ch*self.patch_dim**2)
+
+        self.feature_extractor = Patch_feature_extraction(patch_dim=self.patch_dim)
+        self.rnn = SparseCoding_RNN(train_iter = train_iter, token_dim=self.token_dim)
+        self.reconstructor = Patch_reconstruction(patch_dim=self.patch_dim)
+
+
+    def forward(self, x, algo_params: AlgoParams):
+        x, x_mean = self.feature_extractor(self.phi_op, x)
+        x = self.rnn(self.phi_op, x, algo_params)
+        x = self.reconstructor(self.phi_op, x, x_mean)
+        return x
+    
+
+
+# ==================================================================================================
+# modules for RNN denoising network
+# ==================================================================================================
+
+class Denoising_filter(nn.Module):
+    def __init__(self, token_dim=128):
+        super().__init__()
+
+        self.mlp = nn.Sequential(
+            nn.Conv2d(token_dim, 16, kernel_size=1, bias=False),
+            nn.Conv2d(16, token_dim, kernel_size=1, bias=False)
+        )
+
+        self.mixer = nn.Sequential(
+            nn.Conv2d(token_dim, token_dim, kernel_size=9, bias=False, padding='same', padding_mode='replicate', groups=token_dim)
+        )
+
+    def forward(self, x):
+        x = self.mlp(x)
+        x = self.mixer(x) + x
+        return x
+    
+
+class Depth_Sep_Conv(nn.Module):
+    def __init__(self, token_dim=128, kernel_dim=5):
+        super().__init__()
+        self.layer = nn.Sequential(
+            nn.Conv2d(token_dim, token_dim, kernel_size=kernel_dim, padding='same', bias=False, padding_mode='replicate', groups=token_dim),
+            nn.Conv2d(token_dim, token_dim, kernel_size=1, bias=False)
+        )
+
+    def forward(self, x):
+        return self.layer(x)
+
+
+class Depth_Sep_Conv_Block(nn.Module):
+    def __init__(self, token_dim=128, kernel_dim=5, num_modules=3):
+        super().__init__()
+        self.num_modules = num_modules
+        self.depth_sep_modules = nn.ModuleList([
+            Depth_Sep_Conv(token_dim=token_dim, kernel_dim=kernel_dim) for _ in range(num_modules)
         ])
-
-    def forward(self, xin, num_iter = None):
-        x = xin
-        s = torch.zeros_like(x).to(x.device)
-        for m, module in enumerate(self.refinement_modules):
-            s = s + module(x, num_iter[m] if num_iter is not None else self.unrolled_iter[m])  
-            x = xin - s
-        return s
-
-
-class Conv_only_denoiser(nn.Module):
-    def __init__(self, patch_dim=7, token_dim=64, middle_ch = 128, num_modules=3, unrolled_iter = [1, 1, 1], im_color: str = 'color'):
-        super().__init__()
-
-        self.num_modules = num_modules
-        self.unrolled_iter = unrolled_iter
-
-        self.feature_extractor = Conv_feature_extractor(token_dim=token_dim, patch_dim=patch_dim, im_color=im_color)
-        self.refinement_block = Conv_refinement_Block(token_dim=token_dim, middle_ch=middle_ch, num_modules=num_modules, unrolled_iter = unrolled_iter,)
-        self.reconstructor = Patch_reconstructor(num_ch=token_dim, patch_dim=patch_dim, im_color=im_color)
-
-    def forward(self, x, num_iter = None):
-        x = self.feature_extractor(x)
-        x = self.refinement_block(x, num_iter = num_iter if num_iter is not None else self.unrolled_iter)
-        x = self.reconstructor(x)
-
+    
+    def forward(self, x):
+        for module in self.depth_sep_modules:
+            x = module(x)
         return x
 
 
-
-
-
-
-# ==================================================================================================
-# Transformer modules for Image restoration
-# ==================================================================================================
-
-
-# Transposed Attention module as in "Restormer"
-class MH_TransposedAttention(nn.Module):
-    def __init__(self, token_dim=32, num_heads=2):
+class Conv_Feature_Extraction(nn.Module):
+    def __init__(self, patch_dim=7, token_dim=128, num_modules=3, color_ch=3):
         super().__init__()
 
-        self.num_channels = token_dim
-        self.num_heads = num_heads
-        self.temperature = nn.Parameter(torch.ones(num_heads, 1, 1))
-        
-        self.WQ = nn.Sequential(
-            nn.Conv2d(num_heads*token_dim, num_heads*token_dim, kernel_size=5, bias=False, groups=num_heads*token_dim, stride=4), nn.GELU(),
-            nn.Conv2d(num_heads*token_dim, num_heads*token_dim, kernel_size=5, bias=False, groups=num_heads*token_dim, stride=4)
-            )
-        
-        self.WK = nn.Sequential(
-            nn.Conv2d(num_heads*token_dim, num_heads*token_dim, kernel_size=5, bias=False, groups=num_heads*token_dim, stride=4), nn.GELU(),
-            nn.Conv2d(num_heads*token_dim, num_heads*token_dim, kernel_size=5, bias=False, groups=num_heads*token_dim, stride=4)
-            )
+        self.token_dim = token_dim
 
-        self.WV = nn.Sequential(
-            nn.Conv2d(num_heads*token_dim, num_heads*token_dim, kernel_size=5, bias=False, groups=num_heads*token_dim, padding='same', padding_mode='replicate'), nn.GELU(),
-            nn.Conv2d(num_heads*token_dim, num_heads*token_dim, kernel_size=5, bias=False, groups=num_heads*token_dim, padding='same', padding_mode='replicate')
-            )
-
-        self.linear_mixing = nn.Conv2d(token_dim*num_heads, token_dim, kernel_size=1, bias=False)
-
-    def forward(self, x):
-        # x shape: [B, C, H, W] -> [1, 32, 400, 380]
-        B, C, H, W = x.shape
-
-        # Generate Q, K, V
-        Q = self.WQ(x).view(B, self.num_heads, self.num_channels, -1)
-        K = self.WK(x).view(B, self.num_heads, self.num_channels, -1)
-        V = self.WV(x).view(B, self.num_heads, self.num_channels, -1)
-
-        # Transposed Attention Matrix multiplication: [C, HW] x [HW, C] -> [C, C]
-        # Extremely lightweight: 32x32 matrix calculation!
-        attn = (Q @ K.transpose(-2, -1)) * self.temperature / ((H*W) ** 0.5)
-        attn = attn.softmax(dim=-1)
-
-        # Apply weights to values: [C, C] x [C, HW] -> [C, HW]
-        out = attn @ V
-        
-        del attn, Q, K, V
-
-        # Reshape back to original image dimensions
-        out = out.reshape(B, self.num_heads * self.num_channels, H, W)
-        out = self.linear_mixing(out)
-        return out
-
-
-class MHTA_Transformer_module(nn.Module):
-    def __init__(self, token_dim, num_att_heads, mlp_middle_dim):
-        super().__init__()
-
-        self.multi_head_attention = MH_TransposedAttention(token_dim=token_dim, num_heads=num_att_heads)
-
-        self.mlp_head = nn.Sequential(
-            nn.Conv2d(token_dim, mlp_middle_dim, kernel_size=1, bias=False), nn.GELU(), nn.Conv2d(mlp_middle_dim, token_dim, kernel_size=1, bias=False)
+        self.analysis_op = nn.Sequential(
+            nn.Conv2d(color_ch, 128, kernel_size=patch_dim, bias=False, padding='same', padding_mode='replicate'),
+            Depth_Sep_Conv_Block(token_dim=128, kernel_dim=5, num_modules=num_modules),
+            nn.Conv2d(128, token_dim, kernel_size=1, bias=False)
         )
 
-    def forward(self, xin, num_iter):
-        for iter in range(num_iter):
-            x = self.multi_head_attention(xin) + xin
-            x = self.mlp_head(x) + x
-        return x + xin
-    
+    def forward(self, x):
+        x = self.analysis_op(x)
+        return x
 
-class MHTA_Transformer_Blocks(nn.Module):
-    def __init__(self, token_dim: int, num_att_heads: int, mlp_middle_dim: int, num_modules: int, unrolled_iter: list):
+
+class Conv_Patch_Reconstruction(nn.Module):
+    def __init__(self, patch_dim=7, token_dim=128, num_modules=3, color_ch=3):
         super().__init__()
 
-        self.unrolled_iter = unrolled_iter
-        self.MHTA_transformer_modules = nn.ModuleList([
-            MHTA_Transformer_module(token_dim, num_att_heads, mlp_middle_dim) for m in range(num_modules)
-        ])
+        self.patch_dim = patch_dim
+        self.synthesis_op = nn.Sequential(
+            Depth_Sep_Conv_Block(token_dim=token_dim, kernel_dim=5, num_modules=num_modules),
+            nn.Conv2d(token_dim, color_ch*patch_dim**2, kernel_size=1, bias=False)
+        )
+        
+    def forward(self, x):
+        x = self.synthesis_op(x)
+        
+        B, C, H, W = x.size()
+        x = x.view(B, C, H*W)  # Reshape to (batch_size, channels*patch_dim^2, H*W)
 
-    def forward(self, xin, num_iter = None):
-        x = xin
-        for m, module in enumerate(self.MHTA_transformer_modules):
-            x = module(x, num_iter[m] if num_iter is not None else self.unrolled_iter[m])
-        return x + xin
+        mask = torch.ones_like(x)
+        x = F.fold(x, output_size=(H, W), kernel_size=self.patch_dim, padding=self.patch_dim//2, stride=1)  # Reconstruct the image from patches
+        mask = F.fold(mask, output_size=(H, W), kernel_size=self.patch_dim, padding=self.patch_dim//2, stride=1)
+        x = x / mask
+
+        return x
 
 
-class MHTA_Transformer_Denoiser(nn.Module):
-    def __init__(self, token_dim: int = 32, mlp_middle_dim: int = 64, num_att_heads: int = 1, num_modules: int = 3, unrolled_iter = [1, 1, 1], im_color: str = 'color'):
-        """
-        Args:
-            token_dim: number of channels in the input image
-            mlp_middle_dim: number of channels in the middle of the MLP block
-            num_att_heads: number of attention heads in each transformer module
-            num_modules: number of transformer modules
-            num_iter: number of iterations for the transformer module
-        """
+class Denoising_RNN_Block(nn.Module):
+    def __init__(self, train_iter = 3, token_dim=128):
         super().__init__()
-        self.token_dim, self.mlp_middle_dim = token_dim, mlp_middle_dim
-        self.num_att_heads = num_att_heads
-        self.num_modules = num_modules
-        self.unrolled_iter = unrolled_iter
 
-        self.feature_extractor = Conv_feature_extractor(token_dim=self.token_dim, patch_dim=7, im_color=im_color)
-        self.refinement_block = MHTA_Transformer_Blocks(self.token_dim, self.num_att_heads, self.mlp_middle_dim, self.num_modules, self.unrolled_iter)
-        self.reconstructor = Patch_reconstructor(num_ch=self.token_dim, patch_dim=7, im_color='color')
+        self.train_iter = train_iter
 
-    def forward(self, x, num_iter = None):
+        self.tau_mlp = nn.Sequential(
+            nn.Conv2d(token_dim, 32, kernel_size=1, bias=False),
+            nn.Conv2d(32, 128, kernel_size=1, bias=False), nn.ReLU(),
+            nn.Conv2d(128, 128, kernel_size=1, bias=False), nn.ReLU(),
+            nn.Conv2d(128, 1, kernel_size=1, bias=False)
+        )
+
+        self.filter = Denoising_filter(token_dim=token_dim)
+        
+    def forward(self, xin, algo_params: AlgoParams):
+
+        tau = self.tau_mlp(xin)
+        mean_feature = torch.mean(xin, dim=[2,3], keepdim=True)
+        xin = xin - mean_feature
+
+        x = torch.zeros_like(xin)
+        if algo_params.algo == 'ISTA':
+            for iter in range(algo_params.num_iter if algo_params.num_iter is not None else self.train_iter):
+                x = activation_function(x - self.filter(x) + xin, tau, activation=algo_params.activation)
+
+        elif algo_params.algo == 'new_ISTA':
+            for iter in range(algo_params.num_iter if algo_params.num_iter is not None else self.train_iter):
+                x = x + activation_function(xin - self.filter(x), tau, activation=algo_params.activation)
+
+        elif algo_params.algo == 'FLIPS':
+            G = - xin
+            for iter in range(algo_params.num_iter if algo_params.num_iter is not None else self.train_iter):
+                # Compute update directions for x and G
+                Dx = activation_function(x - G, tau, activation=algo_params.activation) - x
+                DG = self.filter(Dx)
+
+                # Compute FW-stepsize
+                numerator   = - torch.sum(G * Dx, dim = 1, keepdim=True) 
+                denominator =   torch.sum(DG * Dx, dim = 1, keepdim=True)
+                gamma = torch.clamp(numerator.div_(denominator.add_(1e-4)).add_(1e-3), min=0.0, max=1.0)
+
+                # Update x and G
+                x = x + gamma * Dx
+                G = G + gamma * DG
+
+        x = x + mean_feature
+        return x
+
+
+class RNN_denoiser(nn.Module):
+    def __init__(self, patch_dim=7, token_dim=128, train_iter=3, im_color: str = 'color'):
+        super().__init__()
+
+        self.color_ch = 3 if im_color == 'color' else 1
+        self.patch_dim = patch_dim
+        self.token_dim = token_dim
+
+        self.feature_extractor = Conv_Feature_Extraction(patch_dim=self.patch_dim, token_dim=self.token_dim, num_modules=1, color_ch=self.color_ch)
+        self.rnn = Denoising_RNN_Block(train_iter=train_iter, token_dim=self.token_dim)
+        self.reconstructor = Conv_Patch_Reconstruction(patch_dim=self.patch_dim, token_dim=self.token_dim, num_modules=1, color_ch=self.color_ch)
+
+    def forward(self, x, algo_params: AlgoParams):
         x = self.feature_extractor(x)
-        x = self.refinement_block(x, num_iter)
+        x = self.rnn(x, algo_params)
         x = self.reconstructor(x)
         return x
+
+
+
+
+# ==================================================================================================
+# Transformer modules for IMgae denoising
+# ==================================================================================================
+
+
     
+def pixel_unshuffler(x, downscale_factor):
+    pad_h = (downscale_factor - (x.shape[2] % downscale_factor)) % downscale_factor
+    pad_w = (downscale_factor - (x.shape[3] % downscale_factor)) % downscale_factor
+    x = F.pad(x, (0, pad_w, 0, pad_h), mode='replicate')
+    x = F.pixel_unshuffle(x, downscale_factor=downscale_factor)
+
+    return x
 
 
 
-# classical attention based transformers
-class MH_Attention_Vision_module(nn.Module):
+def pixel_shuffler(x, upscale_factor, im_size):
+    x = F.pixel_shuffle(x, upscale_factor=upscale_factor)
+    return x[:, :, :im_size[0], :im_size[1]]
+
+
+
+class Vision_Multi_Head_Attention(nn.Module):
     def __init__(self, token_dim, att_emb_dim, att_out_dim, num_att_heads: int):
         super().__init__()
-
-        self.token_dim, self.att_emb_dim, self.att_out_dim = token_dim, att_emb_dim, att_out_dim
-        self.num_att_heads = num_att_heads
-
-        self.temperature = nn.Parameter(torch.ones(num_att_heads, 1, 1))
+            
+        self.token_dim, self.att_emb_dim, self.att_out_dim, self.num_att_heads = token_dim, att_emb_dim, att_out_dim, num_att_heads
 
         self.WQ = nn.Conv2d(self.token_dim, self.att_emb_dim * self.num_att_heads, kernel_size=1, bias=False)
         self.WK = nn.Conv2d(self.token_dim, self.att_emb_dim * self.num_att_heads, kernel_size=1, bias=False)
-        self.WV = nn.Conv2d(self.token_dim, self.att_out_dim * self.num_att_heads, kernel_size=1, bias=False)
 
-        self.linear_mixing = nn.Conv2d(self.att_out_dim * self.num_att_heads, self.token_dim, kernel_size=1, bias=False)
+        self.WV = nn.Sequential(
+            nn.Conv2d(self.token_dim, self.att_out_dim * self.num_att_heads, kernel_size=1, bias=False)
+            )
+
+        self.linear_mixing = nn.Sequential(
+            nn.Conv2d(self.att_out_dim * self.num_att_heads, self.token_dim, kernel_size=1, bias=False)
+            )
 
     def forward(self, xin):
         B, C, H, W = xin.shape
 
         Q = self.WQ(xin).view(B, self.num_att_heads, self.att_emb_dim, -1)
         K = self.WK(xin).view(B, self.num_att_heads, self.att_emb_dim, -1)
-        V = self.WV(xin).view(B, self.num_att_heads, self.att_out_dim, -1)
-
-        attention = K.transpose(-2, -1) @ Q / (self.temperature * (self.att_emb_dim ** 0.5) )
+        
+        attention = K.transpose(-2, -1) @ Q / (self.att_emb_dim ** 0.5)
         attention = F.softmax(attention, dim=-1)
 
-        output = V @ attention
+        output = self.WV(xin).view(B, self.num_att_heads, self.att_out_dim, -1)
+        output = output @ attention
         output = output.view(B, self.num_att_heads * self.att_out_dim, H, W)
 
         output = self.linear_mixing(output)
         return output
 
-# multi head attention blocks
-class MHA_Transformer_Vision_module(nn.Module):
-    def __init__(self, ch_dimensions: list, num_att_heads: int):
+
+class MHA_Vision_Transformer_module(nn.Module):
+    def __init__(self, ch_dimensions: list, num_att_heads: int, pixel_shuffle_factor: int):
         """
         Args:
-            ch_dimensions: [in_ch_dim, att_emb_ch, att_out_dim, mlp_middle_dim]
+            ch_dimension: [token_dim, att_emb_dim, att_out_dim, mlp_middle_dim]
+            num_att_heads: number of attention heads in each transformer module
         """
         super().__init__()
 
-        self.num_attention_heads = num_att_heads
-        self.in_ch_dim, self.att_emb_dim, self.att_out_dim, self.mlp_middle_dim = ch_dimensions
+        self.pixel_shuffle_factor = pixel_shuffle_factor
 
-        # normalization ---> multiple attention heads ---> mixing
-        self.normalize_att = nn.BatchNorm2d(self.in_ch_dim)
-        self.multi_head_attention = MH_Attention_Vision_module(self.in_ch_dim, self.att_emb_dim, self.att_out_dim, num_att_heads)
+        self.MH_Attention_module = Vision_Multi_Head_Attention(token_dim=ch_dimensions[0]*pixel_shuffle_factor**2, att_emb_dim=ch_dimensions[1], att_out_dim=ch_dimensions[2], num_att_heads=num_att_heads)
 
-        # normalization ---> mlp head
-        self.normalize_mlp = nn.BatchNorm2d(self.in_ch_dim)
         self.mlp_head = nn.Sequential(
-            nn.Conv2d(self.in_ch_dim, self.mlp_middle_dim, kernel_size=1), nn.GELU(), nn.Conv2d(self.mlp_middle_dim, self.in_ch_dim, kernel_size=1)
-            )
+            nn.Conv2d(ch_dimensions[0], ch_dimensions[3], kernel_size=1, bias=False),
+            nn.Conv2d(ch_dimensions[3], ch_dimensions[0], kernel_size=1, bias=False)
+        )
 
+    def forward(self, x):
+
+        x = self.mlp_head(x)
+
+        z = pixel_unshuffler(x, downscale_factor=self.pixel_shuffle_factor)
+        z = self.MH_Attention_module(z)
+        z = pixel_shuffler(z, upscale_factor=self.pixel_shuffle_factor, im_size=x.shape[2:])
+
+        return z + x
     
-    def forward(self, xin):
-        # forward pass for normalization ---> attention head
-        x = self.multi_head_attention(self.normalize_att(xin)) + xin
 
-        # forward pass for the mlp head
-        x = self.mlp_head(self.normalize_mlp(x)) + x
-        return x + xin
-    
-
-class MHA_Transformer_Blocks(nn.Module):
-    def __init__(self, ch_dimensions: list, num_att_heads: int, num_modules: int):
+class MHA_Vision_Transformer_Block(nn.Module):
+    def __init__(self, ch_dimensions: list, num_att_heads: int, pixel_shuffle_factor: int, num_modules: int):
         """
         Args:
-            ch_dimension: [in_ch_dim, att_emb_dim, att_out_dim, mlp_middle_dim]
+            ch_dimension: [token_dim, att_emb_dim, att_out_dim, mlp_middle_dim]
             num_att_heads: number of attention heads in each transformer module
             num_modules: number of transformer modules
         """
         super().__init__()
 
-        self.mha_transformer_modules = nn.ModuleList([
-            MHA_Transformer_Vision_module(ch_dimensions, num_att_heads) for _ in range(num_modules)
-        ])
+        self.MHA_Vision_Transformer_modules = nn.ModuleList([
+            MHA_Vision_Transformer_module(ch_dimensions, num_att_heads, pixel_shuffle_factor) for _ in range(num_modules)
+        ])  
 
     def forward(self, xin):
-        x = xin
-        for module in self.mha_transformer_modules:
-            x = module(x)
-        return x + xin
+        x = torch.zeros_like(xin)
+        for module in self.MHA_Vision_Transformer_modules:
+            x = x + module(xin - x)
+        return x
 
 
-class MHA_Transformer_Denoiser(nn.Module):
-    def __init__(self, patch_dim=7, token_dim=32, num_att_heads=32, att_emb_dim=8, att_out_dim=32, M=10, mlp_middle_dim=64, num_modules=3, im_color: str = 'color'):
+class MHA_Vision_Transformer_Denoiser(nn.Module):
+    def __init__(self, patch_dim=7, token_dim=256, att_emb_dim=8, att_out_dim=64, mlp_middle_dim=16, num_att_heads=2, num_modules=3, pixel_shuffle_factor = 2, im_color: str = 'color'):
         super().__init__()
-        
-        self.feature_extractor = Conv_feature_extractor(token_dim, patch_dim=patch_dim, im_color=im_color)
-        self.rnn = MHA_Transformer_Blocks([token_dim, att_emb_dim, att_out_dim, mlp_middle_dim], num_att_heads, num_modules)
-        self.reconstructor = Patch_reconstructor(token_dim, patch_dim=patch_dim, im_color=im_color)
+
+        self.color_ch = 3 if im_color == 'color' else 1
+
+        self.feature_extractor = Conv_Feature_Extraction(patch_dim=patch_dim, token_dim=token_dim, num_modules=0, color_ch=self.color_ch)
+        self.Transformer_block = MHA_Vision_Transformer_Block(ch_dimensions=[token_dim, att_emb_dim, att_out_dim, mlp_middle_dim], num_att_heads=num_att_heads, pixel_shuffle_factor = pixel_shuffle_factor, num_modules=num_modules)
+        self.reconstructor = Conv_Patch_Reconstruction(patch_dim=patch_dim, token_dim=token_dim, num_modules=0, color_ch=self.color_ch)
+
 
     def forward(self, x):
-        features   = self.feature_extractor(x)
-        rnn_output = self.rnn(features)
-        recon_img  = self.reconstructor(rnn_output)
-        return recon_img
+        x = self.feature_extractor(x)
+        x = self.Transformer_block(x)
+        x = self.reconstructor(x)
+        return x
 
 
 
