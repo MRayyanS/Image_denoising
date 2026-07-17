@@ -270,9 +270,9 @@ class Conv_Feature_Extraction(nn.Module):
         self.token_dim = token_dim
 
         self.analysis_op = nn.Sequential(
-            nn.Conv2d(color_ch, 128, kernel_size=patch_dim, bias=False, padding='same', padding_mode='replicate'),
-            Depth_Sep_Conv_Block(token_dim=128, kernel_dim=5, num_modules=num_modules),
-            nn.Conv2d(128, token_dim, kernel_size=1, bias=False)
+            nn.Conv2d(color_ch, token_dim, kernel_size=patch_dim, bias=False, padding='same', padding_mode='replicate'),
+            Depth_Sep_Conv_Block(token_dim=token_dim, kernel_dim=5, num_modules=num_modules),
+            nn.Conv2d(token_dim, token_dim, kernel_size=1, bias=False)
         )
 
     def forward(self, x):
@@ -406,13 +406,13 @@ class Vision_Multi_Head_Attention(nn.Module):
         self.WQ = nn.Conv2d(self.token_dim, self.att_emb_dim * self.num_att_heads, kernel_size=1, bias=False)
         self.WK = nn.Conv2d(self.token_dim, self.att_emb_dim * self.num_att_heads, kernel_size=1, bias=False)
 
-        self.WV = nn.Sequential(
-            nn.Conv2d(self.token_dim, self.att_out_dim * self.num_att_heads, kernel_size=1, bias=False)
-            )
+        # self.WV = nn.Sequential(
+        #     nn.Conv2d(self.token_dim, self.att_out_dim * self.num_att_heads, kernel_size=1, bias=False)
+        #     )
 
-        self.linear_mixing = nn.Sequential(
-            nn.Conv2d(self.att_out_dim * self.num_att_heads, self.token_dim, kernel_size=1, bias=False)
-            )
+        # self.linear_mixing = nn.Sequential(
+        #     nn.Conv2d(self.att_out_dim * self.num_att_heads, self.token_dim, kernel_size=1, bias=False)
+        #     )
 
     def forward(self, xin):
         B, C, H, W = xin.shape
@@ -421,13 +421,16 @@ class Vision_Multi_Head_Attention(nn.Module):
         K = self.WK(xin).view(B, self.num_att_heads, self.att_emb_dim, -1)
         
         attention = K.transpose(-2, -1) @ Q / (self.att_emb_dim ** 0.5)
-        attention = F.softmax(attention, dim=-1)
+        attention = F.softmax(attention, dim=-1).squeeze()
 
-        output = self.WV(xin).view(B, self.num_att_heads, self.att_out_dim, -1)
-        output = output @ attention
-        output = output.view(B, self.num_att_heads * self.att_out_dim, H, W)
+        output = xin.view(B, C, H * W) @ attention
+        output = output.view(B, C, H, W)
 
-        output = self.linear_mixing(output)
+        # output = self.WV(xin).view(B, self.num_att_heads, self.att_out_dim, -1)
+        # output = output @ attention
+        # output = output.view(B, self.num_att_heads * self.att_out_dim, H, W)
+
+        # output = self.linear_mixing(output)
         return output
 
 
@@ -482,21 +485,82 @@ class MHA_Vision_Transformer_Block(nn.Module):
 
 
 class MHA_Vision_Transformer_Denoiser(nn.Module):
-    def __init__(self, patch_dim=7, token_dim=256, att_emb_dim=8, att_out_dim=64, mlp_middle_dim=16, num_att_heads=2, num_modules=3, pixel_shuffle_factor = 2, im_color: str = 'color'):
+    def __init__(self, dim_list, num_att_heads=2, num_modules=3, pixel_shuffle_factor = 2, im_color: str = 'color'):
         super().__init__()
+        """
+            Args:
+            dim_list = [patch_dim, token_dim, att_emb_dim, att_out_dim, mlp_middle_dim]
+            num_att_heads: number of attention heads in each transformer module
+            num_modules: number of transformer modules
+            pixel_shuffle_factor: number of pixels to be shuffled in each dimension
+        """
 
         self.color_ch = 3 if im_color == 'color' else 1
 
-        self.feature_extractor = Conv_Feature_Extraction(patch_dim=patch_dim, token_dim=token_dim, num_modules=0, color_ch=self.color_ch)
-        self.Transformer_block = MHA_Vision_Transformer_Block(ch_dimensions=[token_dim, att_emb_dim, att_out_dim, mlp_middle_dim], num_att_heads=num_att_heads, pixel_shuffle_factor = pixel_shuffle_factor, num_modules=num_modules)
-        self.reconstructor = Conv_Patch_Reconstruction(patch_dim=patch_dim, token_dim=token_dim, num_modules=0, color_ch=self.color_ch)
+        self.patch_dim, self.token_dim, self.att_emb_dim, self.att_out_dim, self.mlp_middle_dim = dim_list
+        
 
+        self.feature_extractor = Conv_Feature_Extraction(patch_dim=self.patch_dim, token_dim=self.token_dim, num_modules=1, color_ch=self.color_ch)
+        self.Transformer_block = MHA_Vision_Transformer_Block(ch_dimensions=dim_list[1:], num_att_heads=num_att_heads, pixel_shuffle_factor = pixel_shuffle_factor, num_modules=num_modules)
+        self.reconstructor = Conv_Patch_Reconstruction(patch_dim=self.patch_dim, token_dim=self.token_dim, num_modules=1, color_ch=self.color_ch)
 
     def forward(self, x):
         x = self.feature_extractor(x)
         x = self.Transformer_block(x)
         x = self.reconstructor(x)
         return x
+
+
+# =============================================================================================================================
+# Convolutional modules for denoising
+# =============================================================================================================================
+
+class Conv_Refinement_Module(nn.Module):
+    def __init__(self, token_dim):
+        super().__init__()
+
+        self.conv_module = nn.Sequential(
+            nn.Conv2d(token_dim, 2*token_dim, kernel_size=1, bias=False),
+            nn.Conv2d(2*token_dim, 2*token_dim, kernel_size=5, padding='same', bias=False, padding_mode='replicate', groups=2*token_dim),
+            nn.ReLU(),
+            nn.Conv2d(2*token_dim, token_dim, kernel_size=1, bias=False)
+        )
+
+    def forward(self, x):
+        x = self.conv_module(x)
+        return x
+    
+class Conv_Refinement_Block(nn.Module):
+    def __init__(self, token_dim, num_modules):
+        super().__init__()
+
+        self.res_modules = nn.ModuleList([
+            Conv_Refinement_Module(token_dim) for _ in range(num_modules)
+        ])
+
+    def forward(self, xin):
+        x = torch.zeros_like(xin)
+        for module in self.res_modules:
+            x = x + module(xin - x)
+        return x
+    
+class Fully_Conv_Refinement_Module(nn.Module):
+    def __init__(self, dim_list, num_modules=3, im_color: str = 'color'):
+        super().__init__()
+
+        self.color_ch = 3 if im_color == 'color' else 1
+        self.patch_dim, self.token_dim = dim_list
+        
+        self.feature_extractor = Conv_Feature_Extraction(patch_dim=self.patch_dim, token_dim=self.token_dim, num_modules=1, color_ch=self.color_ch)
+        self.refinement_block  = Conv_Refinement_Block(token_dim=self.token_dim, num_modules=num_modules)
+        self.reconstructor     = Conv_Patch_Reconstruction(patch_dim=self.patch_dim, token_dim=self.token_dim, num_modules=1, color_ch=self.color_ch)
+
+    def forward(self, x):
+        x = self.feature_extractor(x)
+        x = self.refinement_block(x)
+        x = self.reconstructor(x)
+        return x
+
 
 
 

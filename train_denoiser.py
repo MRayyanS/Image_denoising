@@ -44,7 +44,7 @@ from dataset_loaders import get_dataloaders
 
 # Your specific paths
 TRAIN_PATH = 'datasets/BSDS500/train'
-VAL_PATH   = 'datasets/BSD68'
+VAL_PATH   = 'datasets/BSDS500/val'
 TEST_PATH  = 'datasets/BSD68'
 
 # Set some hyperpaprameters
@@ -194,28 +194,26 @@ if __name__ == '__main__':
     try:
         device = torch.device('mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Using device: {device}")
+
+        # define denoiser type
+        denoiser_type = 'conv' # 'conv', 'transformer'
     
         # define the model to be trained
         patch_dim = 9
-        token_dim = 32
+        token_dim = 64
         att_emb_dim = 4
         att_out_dim = 16
         mlp_middle_dim = att_out_dim
         num_att_heads = 1
-        num_modules = 5
+        num_modules = 3
         pixel_shuffle_factor = 3
-        
-        training_model = MHA_Vision_Transformer_Denoiser(
-            patch_dim=patch_dim,
-            token_dim=token_dim,
-            att_emb_dim=att_emb_dim,
-            att_out_dim=att_out_dim,
-            mlp_middle_dim=mlp_middle_dim,
-            num_att_heads=num_att_heads,
-            num_modules=num_modules,
-            pixel_shuffle_factor = pixel_shuffle_factor,
-            im_color=im_color
-            ).to(device)
+
+        if denoiser_type == 'conv':
+            dim_list = [patch_dim, token_dim]
+            training_model = Fully_Conv_Refinement_Module( dim_list=dim_list, num_modules=num_modules, im_color=im_color).to(device)
+        elif denoiser_type == 'transformer':
+            dim_list = [patch_dim, token_dim, att_emb_dim, att_out_dim, mlp_middle_dim]
+            training_model = MHA_Vision_Transformer_Denoiser( dim_list=dim_list, num_att_heads=num_att_heads, num_modules=num_modules, pixel_shuffle_factor = pixel_shuffle_factor, im_color=im_color).to(device)
 
 
         # load a pre-learned model if any
@@ -275,17 +273,13 @@ if __name__ == '__main__':
         print('-' * 80)
         
         # Load the best model weights before evaluation and saving
-        best_model =  MHA_Vision_Transformer_Denoiser(
-            patch_dim=patch_dim,
-            token_dim=token_dim,
-            att_emb_dim=att_emb_dim,
-            att_out_dim=att_out_dim,
-            mlp_middle_dim=mlp_middle_dim,
-            num_att_heads=num_att_heads,
-            num_modules=num_modules,
-            pixel_shuffle_factor = 3,
-            im_color=im_color
-            ).to(device)
+        if denoiser_type == 'conv':
+            dim_list = [patch_dim, token_dim]
+            best_model = Fully_Conv_Refinement_Module( dim_list=dim_list, num_modules=num_modules, im_color=im_color).to(device)
+        elif denoiser_type == 'transformer':
+            dim_list = [patch_dim, token_dim, att_emb_dim, att_out_dim, mlp_middle_dim]
+            best_model = MHA_Vision_Transformer_Denoiser( dim_list=dim_list, num_att_heads=num_att_heads, num_modules=num_modules, pixel_shuffle_factor = pixel_shuffle_factor, im_color=im_color).to(device)
+      
         
         best_model.load_state_dict(best_model_state_dict)
 
