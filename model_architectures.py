@@ -520,10 +520,10 @@ class Conv_Refinement_Module(nn.Module):
         super().__init__()
 
         self.conv_module = nn.Sequential(
-            nn.Conv2d(token_dim, 2*token_dim, kernel_size=1, bias=False),
-            nn.Conv2d(2*token_dim, 2*token_dim, kernel_size=5, padding='same', bias=False, padding_mode='replicate', groups=2*token_dim),
+            nn.Conv2d(token_dim, 4*token_dim, kernel_size=1, bias=False),
+            nn.Conv2d(4*token_dim, 4*token_dim, kernel_size=7, padding='same', bias=False, padding_mode='replicate', groups=4*token_dim),
             nn.ReLU(),
-            nn.Conv2d(2*token_dim, token_dim, kernel_size=1, bias=False)
+            nn.Conv2d(4*token_dim, token_dim, kernel_size=1, bias=False)
         )
 
     def forward(self, x):
@@ -551,9 +551,9 @@ class Fully_Conv_Refinement_Module(nn.Module):
         self.color_ch = 3 if im_color == 'color' else 1
         self.patch_dim, self.token_dim = dim_list
         
-        self.feature_extractor = Conv_Feature_Extraction(patch_dim=self.patch_dim, token_dim=self.token_dim, num_modules=1, color_ch=self.color_ch)
+        self.feature_extractor = Conv_Feature_Extraction(patch_dim=self.patch_dim, token_dim=self.token_dim, num_modules=2, color_ch=self.color_ch)
         self.refinement_block  = Conv_Refinement_Block(token_dim=self.token_dim, num_modules=num_modules)
-        self.reconstructor     = Conv_Patch_Reconstruction(patch_dim=self.patch_dim, token_dim=self.token_dim, num_modules=1, color_ch=self.color_ch)
+        self.reconstructor     = Conv_Patch_Reconstruction(patch_dim=self.patch_dim, token_dim=self.token_dim, num_modules=2, color_ch=self.color_ch)
 
     def forward(self, x):
         x = self.feature_extractor(x)

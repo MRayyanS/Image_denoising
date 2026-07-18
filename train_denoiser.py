@@ -40,8 +40,6 @@ device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
 # LOAD appropriate DATASET and create train/val split
 # ============================================================================
 
-from dataset_loaders import get_dataloaders
-
 # Your specific paths
 TRAIN_PATH = 'datasets/BSDS500/train'
 VAL_PATH   = 'datasets/BSDS500/val'
@@ -200,12 +198,14 @@ if __name__ == '__main__':
     
         # define the model to be trained
         patch_dim = 9
-        token_dim = 64
+        token_dim = 32
+
         att_emb_dim = 4
         att_out_dim = 16
         mlp_middle_dim = att_out_dim
         num_att_heads = 1
-        num_modules = 3
+        
+        num_modules = 5
         pixel_shuffle_factor = 3
 
         if denoiser_type == 'conv':

@@ -13,6 +13,7 @@ myenv/
 datasets/
 eval_results/
 other utility function/
+training_plots/
 
 # specific files
 training_log.txt

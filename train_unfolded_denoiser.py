@@ -42,8 +42,6 @@ device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
 # LOAD appropriate DATASET and create train/val split
 # ============================================================================
 
-from dataset_loaders import get_dataloaders
-
 # Your specific paths
 TRAIN_PATH = 'datasets/BSDS500/train'
 VAL_PATH   = 'datasets/BSD68'

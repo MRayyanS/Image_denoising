@@ -9,70 +9,116 @@ import torch.optim as optim
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 
+
+import os
+from PIL import Image
+
+
 import sys
 
 
+
+
+
+# ============================================================================
+# Loading checkpoint from last training
+# ============================================================================
 # function to load checkpoint
 def load_checkpoint(checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     return checkpoint
 
+
+
+
+
 # ============================================================================
-# Build Model - CNN based
+# Dataloaders for Image Denoising
 # ============================================================================
 
-# canonical vanilla Conv2d block and modules like in VGGnet
-class ConvModule(nn.Module):
-    def __init__(self, in_ch):
-        super(ConvModule, self).__init__()
+class DenoiserDataset(Dataset):
+    """
+    Dataset for Image Denoising on BSDS500.
+    Supports both 'color' (RGB) and 'gray' (Grayscale) formats.
+    Returns: (noisy_image, clean_image)
+    """
+    def __init__(self, root_dir, sigma=25, transform=None, im_color='color'):
+        self.root_dir = root_dir
+        # Get all image files
+        self.img_names = [f for f in os.listdir(root_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'))]
+        self.img_names.sort()
+        self.sigma = sigma / 255.0  # Normalize noise level to [0, 1] range
+        self.transform = transform
+        
+        # Dynamically determine PIL conversion mode: 'RGB' for 3 channels, 'L' for 1 channel
+        self.mode = 'RGB' if im_color == 'color' else 'L'
 
-        self.convmodule = nn.Sequential(
-            nn.Conv2d(in_ch, in_ch, kernel_size=3, padding=1), nn.BatchNorm2d(in_ch), nn.ReLU()
-        )
+    def __len__(self):
+        return len(self.img_names)
 
-    def forward(self, x):
-        x = self.convmodule(x)
-        return x
+    def __getitem__(self, idx):
+        # 1. Load Clean Image using the selected color mode
+        img_path = os.path.join(self.root_dir, self.img_names[idx])
+        clean_img = Image.open(img_path).convert(self.mode)
 
-class ConvBlock(nn.Module):
-    def __init__(self, in_ch, num_blocks):
-        super(ConvBlock, self).__init__()
+        # 2. Apply Transform (e.g., RandomCrop for training)
+        if self.transform:
+            clean_img = self.transform(clean_img)
+        else:
+            clean_img = transforms.ToTensor()(clean_img)
 
-        self.conv_modules = nn.ModuleList([
-            ConvModule(in_ch) for _ in range(num_blocks)
-        ])
+        # 3. Create Noisy Version (Input)
+        # torch.randn_like now automatically maps to 1 channel or 3 channels 
+        # depending on the clean_img tensor dimensions
+        noise = torch.randn_like(clean_img) * self.sigma
+        noisy_img = clean_img + noise
+        
+        # Clamp to ensure pixels stay in valid [0, 1] range
+        noisy_img = torch.clamp(noisy_img, 0.0, 1.0)
 
-    def forward(self, x):
-        for module in self.conv_modules:
-            x = module(x)
-        return x
+        # Normalize to [-1, 1] range
+        noisy_img = (noisy_img - 0.5) / 0.5
+        clean_img = (clean_img - 0.5) / 0.5
+
+        return noisy_img, clean_img
+
+def get_dataloaders(train_dir, val_dir, test_dir, batch_size=16, patch_size=128, sigma=25, im_color='color'):
+    """
+    Returns train, validation, and test dataloaders.
+    """
+    
+    # Training Transform: Uses RandomCrop to allow batching
+    train_transform = transforms.Compose([
+        transforms.RandomCrop(patch_size),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomVerticalFlip(),
+        transforms.RandomRotation(degrees=90),
+        transforms.ToTensor()
+    ])
+
+    # Validation Transform: Keeps ORIGINAL RESOLUTION
+    val_transform = transforms.Compose([
+        # transforms.CenterCrop(128),
+        transforms.ToTensor()
+    ])
+
+    # transoform for test set is same as val set since we want to evaluate on original resolution
+    test_transform = val_transform
+
+    train_ds = DenoiserDataset(train_dir, sigma=sigma, transform=train_transform, im_color=im_color)
+    val_ds   = DenoiserDataset(val_dir, sigma=sigma, transform=val_transform, im_color=im_color)
+    test_ds  = DenoiserDataset(test_dir, sigma=sigma, transform=test_transform, im_color=im_color)
+
+    # Note: val_loader MUST have batch_size=1 to handle original resolutions
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, pin_memory=True)
+    val_loader   = DataLoader(val_ds, batch_size=1, shuffle=False, pin_memory=True)
+    test_loader  = DataLoader(test_ds, batch_size=1, shuffle=False, pin_memory=True)
+
+    return train_loader, val_loader, test_loader
 
 
-# residual blocks like original ResNet paper
-class VanillaResModule(nn.Module):
-    def __init__(self, in_ch):
-        super(VanillaResModule, self).__init__()
 
-        self.VanResModule = nn.Sequential(
-            nn.ReLU(), nn.Conv2d(in_ch, in_ch, kernel_size=3, padding=1), nn.BatchNorm2d(in_ch)
-        )
 
-    def forward(self, x):
-        x = self.VanResModule(x) + x
-        return x
-
-class VanillaResBlock(nn.Module):
-    def __init__(self, in_ch, num_modules):
-        super(VanillaResBlock, self).__init__()
-
-        self.resModules = nn.ModuleList([
-            VanillaResModule(in_ch) for _ in range(num_modules)
-        ])
-
-    def forward(self, x):
-        for module in self.resModules:
-            x = module(x)
-        return x
 
 
 # ============================================================================
@@ -164,6 +210,9 @@ def count_parameters(model):
     print(table)
     print(f"Total Trainable Params: {total_params}")
     return total_params
+
+
+
 
 
 
