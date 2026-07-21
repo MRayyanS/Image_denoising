@@ -32,9 +32,46 @@ def load_checkpoint(checkpoint_path, device):
 
 
 
+
 # ============================================================================
 # Dataloaders for Image Denoising
 # ============================================================================
+
+import random
+
+class PairedSpatialTransform:
+    """
+    Applies synchronized geometric augmentations to both clean and noisy target tracks
+    to ensure pixel-perfect structural alignment.
+    Uses discrete 90-degree rotations to prevent pixel interpolation blurring artifacts.
+    """
+    def __init__(self, patch_size):
+        self.patch_size = patch_size
+
+    def __call__(self, img):
+        # Expects a PIL Image, returns a PyTorch Tensor
+        return img
+
+    def apply_paired(self, img):
+        # 1. Synchronized Random Crop
+        i, j, h, w = transforms.RandomCrop.get_params(img, output_size=(self.patch_size, self.patch_size))
+        img = TF.crop(img, i, j, h, w)
+
+        # 2. Synchronized Horizontal Flip
+        if random.random() > 0.5:
+            img = TF.hflip(img)
+
+        # 3. Synchronized Vertical Flip
+        if random.random() > 0.5:
+            img = TF.vflip(img)
+
+        # 4. Strict Orthogonal Rotations (No interpolation artifacts)
+        if random.random() > 0.75:
+            angle = random.choice([90, 180, 270])
+            img = TF.rotate(img, angle)
+
+        return transforms.ToTensor()(img)
+
 
 class DenoiserDataset(Dataset):
     """
@@ -42,35 +79,38 @@ class DenoiserDataset(Dataset):
     Supports both 'color' (RGB) and 'gray' (Grayscale) formats.
     Returns: (noisy_image, clean_image)
     """
-    def __init__(self, root_dir, sigma=25, transform=None, im_color='color'):
+    def __init__(self, root_dir, sigma_range=[5, 50], transform=None, im_color='color'):
         self.root_dir = root_dir
-        # Get all image files
         self.img_names = [f for f in os.listdir(root_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'))]
         self.img_names.sort()
-        self.sigma = sigma / 255.0  # Normalize noise level to [0, 1] range
+
+        # self.sigma = sigma / 255.0  # Normalize noise level to [0, 1] range
+        self.sigma_min = sigma_range[0] / 255.0
+        self.sigma_max = sigma_range[1] / 255.0
+
         self.transform = transform
-        
-        # Dynamically determine PIL conversion mode: 'RGB' for 3 channels, 'L' for 1 channel
         self.mode = 'RGB' if im_color == 'color' else 'L'
 
     def __len__(self):
         return len(self.img_names)
 
     def __getitem__(self, idx):
-        # 1. Load Clean Image using the selected color mode
+        # 1. Load Clean Image
         img_path = os.path.join(self.root_dir, self.img_names[idx])
         clean_img = Image.open(img_path).convert(self.mode)
 
-        # 2. Apply Transform (e.g., RandomCrop for training)
+        # 2. Apply Custom Paired or Standard Transform
         if self.transform:
-            clean_img = self.transform(clean_img)
+            if isinstance(self.transform, PairedSpatialTransform):
+                clean_img = self.transform.apply_paired(clean_img)
+            else:
+                clean_img = self.transform(clean_img)
         else:
             clean_img = transforms.ToTensor()(clean_img)
 
-        # 3. Create Noisy Version (Input)
-        # torch.randn_like now automatically maps to 1 channel or 3 channels 
-        # depending on the clean_img tensor dimensions
-        noise = torch.randn_like(clean_img) * self.sigma
+        # 3. Create Noisy Version (Input) after spatial modification
+        sigma = random.uniform(self.sigma_min, self.sigma_max)
+        noise = torch.randn_like(clean_img) * sigma
         noisy_img = clean_img + noise
         
         # Clamp to ensure pixels stay in valid [0, 1] range
@@ -82,40 +122,39 @@ class DenoiserDataset(Dataset):
 
         return noisy_img, clean_img
 
-def get_dataloaders(train_dir, val_dir, test_dir, batch_size=16, patch_size=128, sigma=25, im_color='color'):
+
+# def get_dataloaders(train_dir, val_dir, test_dir, batch_size=16, patch_size=128, sigma_range=[5,50], im_color='color'):
+#     """
+#     Returns train, validation, and test dataloaders.
+#     """
+#     # Training Transform: Swapped standard Compose for our paired execution pipeline
+#     train_transform = PairedSpatialTransform(patch_size)
+
+#     # Validation & Test Transforms: Keep original spatial structure, convert directly to tensor
+#     val_transform = transforms.ToTensor()
+#     test_transform = val_transform
+
+#     train_ds = DenoiserDataset(train_dir, sigma_range=sigma_range, transform=train_transform, im_color=im_color)
+#     val_ds   = DenoiserDataset(val_dir, sigma_range=sigma_range, transform=val_transform, im_color=im_color)
+#     test_ds  = DenoiserDataset(test_dir, sigma_range=sigma_range, transform=test_transform, im_color=im_color)
+
+#     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, pin_memory=True)
+#     val_loader   = DataLoader(val_ds, batch_size=1, shuffle=False, pin_memory=True)
+#     test_loader  = DataLoader(test_ds, batch_size=1, shuffle=False, pin_memory=True)
+
+#     return train_loader, val_loader, test_loader
+
+
+def im_denoising_dataloader(image_dir=None, batch_size=16, transform=None, sigma_range=[5,50], im_color='color'):
     """
     Returns train, validation, and test dataloaders.
     """
+
+    image_ds = DenoiserDataset(image_dir, sigma_range=sigma_range, transform=transform, im_color=im_color)
     
-    # Training Transform: Uses RandomCrop to allow batching
-    train_transform = transforms.Compose([
-        transforms.RandomCrop(patch_size),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomVerticalFlip(),
-        transforms.RandomRotation(degrees=90),
-        transforms.ToTensor()
-    ])
-
-    # Validation Transform: Keeps ORIGINAL RESOLUTION
-    val_transform = transforms.Compose([
-        # transforms.CenterCrop(128),
-        transforms.ToTensor()
-    ])
-
-    # transoform for test set is same as val set since we want to evaluate on original resolution
-    test_transform = val_transform
-
-    train_ds = DenoiserDataset(train_dir, sigma=sigma, transform=train_transform, im_color=im_color)
-    val_ds   = DenoiserDataset(val_dir, sigma=sigma, transform=val_transform, im_color=im_color)
-    test_ds  = DenoiserDataset(test_dir, sigma=sigma, transform=test_transform, im_color=im_color)
-
-    # Note: val_loader MUST have batch_size=1 to handle original resolutions
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, pin_memory=True)
-    val_loader   = DataLoader(val_ds, batch_size=1, shuffle=False, pin_memory=True)
-    test_loader  = DataLoader(test_ds, batch_size=1, shuffle=False, pin_memory=True)
-
-    return train_loader, val_loader, test_loader
-
+    image_loader = DataLoader(image_ds, batch_size=batch_size, shuffle=True, pin_memory=True)
+    
+    return image_loader
 
 
 

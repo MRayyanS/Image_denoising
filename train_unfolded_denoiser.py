@@ -44,26 +44,29 @@ device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
 
 # Your specific paths
 TRAIN_PATH = 'datasets/BSDS500/train'
-VAL_PATH   = 'datasets/BSD68'
-TEST_PATH  = 'datasets/Set12'
+VAL_PATH   = 'datasets/BSDS500/val'
+TEST_PATH  = 'datasets/BSD68'
 
 # Set some hyperpaprameters
-batch_size = 1
+batch_size = 2
 patch_size = 128
-noise_sigma = 25
+sigma_range = [5,25]
 im_color = 'gray' # 'color' or 'gray'
 
-# create dataloaders
-train_loader, val_loader, test_loader = get_dataloaders(
-    train_dir=TRAIN_PATH, 
-    val_dir=VAL_PATH, 
-    test_dir=TEST_PATH,
-    batch_size=batch_size, 
-    patch_size=patch_size, 
-    sigma=noise_sigma,
-    im_color=im_color
-)
+# options: 'im_out', 'noise_out'
+denoiser_learning_mode = 'im_out'
+# denoiser_learning_mode = 'noise_out'
 
+# initialize model from a pre-learned model
+pre_learned_init = True  # False or True
+
+train_transform = PairedSpatialTransform(patch_size)
+train_loader = im_denoising_dataloader(image_dir=TRAIN_PATH, batch_size=batch_size, transform = train_transform, sigma_range=sigma_range, im_color=im_color)
+
+sigma_range = [25,25.1]
+val_transform = transforms.ToTensor()
+val_loader  = im_denoising_dataloader(image_dir=VAL_PATH, batch_size=1, transform = val_transform, sigma_range=sigma_range, im_color=im_color)
+test_loader = im_denoising_dataloader(image_dir=TEST_PATH, batch_size=1, transform = val_transform, sigma_range=sigma_range, im_color=im_color)
 
 # ============================================================================
 # Build train loop, validation, and test functions
@@ -152,7 +155,6 @@ def test(model: Any, algo_params: AlgoParams, learning_mode: str):
             
     avg_loss = test_loss / len(test_loader)
     return avg_loss, PSNR_values
-
 
 
 @torch.no_grad()
@@ -254,13 +256,6 @@ def profile_unrolled_denoising_model(model: Any, algo_params, sample_batch_loade
 # ============================================================================
 # Training loop
 # ============================================================================
-
-# options: 'im_out', 'noise_out'
-denoiser_learning_mode = 'im_out'
-
-# to initialize with a pre-learned model or start from scratch
-pre_learned_init = False
-
 
 if __name__ == '__main__':
 

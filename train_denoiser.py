@@ -30,8 +30,9 @@ warnings.filterwarnings("ignore", category=UserWarning)
 # ============================================================================
 # Essential global variables
 # ============================================================================
-np.random.seed(999)
-torch.manual_seed(999)
+seed = 1000000
+np.random.seed(seed)
+torch.manual_seed(seed)
 device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
 # torch.mps.synchronize()
 
@@ -48,7 +49,7 @@ TEST_PATH  = 'datasets/BSD68'
 # Set some hyperpaprameters
 batch_size = 2
 patch_size = 128
-noise_sigma = 25
+sigma_range = [20,25]
 im_color = 'gray' # 'color' or 'gray'
 
 # options: 'im_out', 'noise_out'
@@ -56,19 +57,15 @@ denoiser_learning_mode = 'im_out'
 # denoiser_learning_mode = 'noise_out'
 
 # initialize model from a pre-learned model
-pre_learned_init = False  # False or True
+pre_learned_init = True  # False or True
 
+train_transform = PairedSpatialTransform(patch_size)
+train_loader = im_denoising_dataloader(image_dir=TRAIN_PATH, batch_size=batch_size, transform = train_transform, sigma_range=sigma_range, im_color=im_color)
 
-# create dataloaders
-train_loader, val_loader, test_loader = get_dataloaders(
-    train_dir=TRAIN_PATH, 
-    val_dir=VAL_PATH, 
-    test_dir=TEST_PATH,
-    batch_size=batch_size, 
-    patch_size=patch_size, 
-    sigma=noise_sigma,
-    im_color=im_color
-)
+sigma_range = [25,25.1]
+val_transform = transforms.ToTensor()
+val_loader  = im_denoising_dataloader(image_dir=VAL_PATH, batch_size=1, transform = val_transform, sigma_range=sigma_range, im_color=im_color)
+test_loader = im_denoising_dataloader(image_dir=TEST_PATH, batch_size=1, transform = val_transform, sigma_range=sigma_range, im_color=im_color)
 
 
 # ============================================================================
@@ -197,20 +194,19 @@ if __name__ == '__main__':
         denoiser_type = 'conv' # 'conv', 'transformer'
     
         # define the model to be trained
-        patch_dim = 9
-        token_dim = 32
+        patch_dim = 7
+        token_dim = 16
+        num_modules = 8
 
         att_emb_dim = 4
         att_out_dim = 16
         mlp_middle_dim = att_out_dim
         num_att_heads = 1
-        
-        num_modules = 5
         pixel_shuffle_factor = 3
 
         if denoiser_type == 'conv':
             dim_list = [patch_dim, token_dim]
-            training_model = Fully_Conv_Refinement_Module( dim_list=dim_list, num_modules=num_modules, im_color=im_color).to(device)
+            training_model = Fully_Conv_Denoiser( dim_list=dim_list, num_modules=num_modules, im_color=im_color).to(device)
         elif denoiser_type == 'transformer':
             dim_list = [patch_dim, token_dim, att_emb_dim, att_out_dim, mlp_middle_dim]
             training_model = MHA_Vision_Transformer_Denoiser( dim_list=dim_list, num_att_heads=num_att_heads, num_modules=num_modules, pixel_shuffle_factor = pixel_shuffle_factor, im_color=im_color).to(device)
@@ -231,7 +227,7 @@ if __name__ == '__main__':
         print(f'Starting training... using device: {device}')
         print(f"✓ Batch size: {batch_size}, Training batches per epoch: {len(train_loader)}, Total images:{len(train_loader)*batch_size}")
         
-        num_epochs = 250
+        num_epochs = 750
         learning_rate = 0.00125   #0.00125
         
         optimizer = optim.AdamW(training_model.parameters(), lr=learning_rate, weight_decay=1e-4)
@@ -275,7 +271,7 @@ if __name__ == '__main__':
         # Load the best model weights before evaluation and saving
         if denoiser_type == 'conv':
             dim_list = [patch_dim, token_dim]
-            best_model = Fully_Conv_Refinement_Module( dim_list=dim_list, num_modules=num_modules, im_color=im_color).to(device)
+            best_model = Fully_Conv_Denoiser( dim_list=dim_list, num_modules=num_modules, im_color=im_color).to(device)
         elif denoiser_type == 'transformer':
             dim_list = [patch_dim, token_dim, att_emb_dim, att_out_dim, mlp_middle_dim]
             best_model = MHA_Vision_Transformer_Denoiser( dim_list=dim_list, num_att_heads=num_att_heads, num_modules=num_modules, pixel_shuffle_factor = pixel_shuffle_factor, im_color=im_color).to(device)

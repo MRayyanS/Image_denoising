@@ -5,7 +5,6 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 
-from dataset_loaders import get_dataloaders
 from model_architectures import *
 from utils import *
 
@@ -78,15 +77,9 @@ def eval_varying_noise_fixed_iter(model, noise_list, algo_params, args, im_color
 
     for sigma in noise_list:
         # Load dataloader specific to the current noise level (sigma)
-        _, _, test_loader = get_dataloaders(
-            train_dir=args.train_dir,
-            val_dir=args.val_dir,
-            test_dir=args.test_dir,
-            batch_size=args.batch_size,
-            patch_size=args.patch_size,
-            sigma=sigma,
-            im_color=im_color
-        )
+
+        test_transform = transforms.ToTensor()
+        test_loader = im_denoising_dataloader(image_dir=args.test_dir, batch_size=args.batch_size, transform = test_transform, sigma_range=[args.fixed_sigma, args.fixed_sigma + 0.1], im_color=im_color)
 
         model.eval()
         psnr_values = []
@@ -275,15 +268,9 @@ def main(args):
     # ---------------------------------------------------------
     # Experiment 1: Fixed Noise Level, Varying Iterations
     # ---------------------------------------------------------
-    _, _, test_loader_fixed_noise = get_dataloaders(
-        train_dir=args.train_dir,
-        val_dir=args.val_dir,
-        test_dir=args.test_dir,
-        batch_size=args.batch_size,
-        patch_size=args.patch_size,
-        sigma=args.noise_sigma,
-        im_color=im_color
-    )
+    
+    test_transform = transforms.ToTensor()
+    test_loader_fixed_noise = im_denoising_dataloader(image_dir=args.test_dir, batch_size=args.batch_size, transform = test_transform, sigma_range=[args.fixed_sigma, args.fixed_sigma + 0.1], im_color=im_color)
 
     # Plotting to investigate the phi matrix
     print(f'Using device: {device}')
@@ -375,7 +362,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch-size', type=int, default=8, help='Batch size for evaluation.')
     
     # Defaults for curves
-    parser.add_argument('--noise-sigma', type=int, default=default_sigma, help='Fixed noise level for the varying iterations plot.')
+    parser.add_argument('--fixed-sigma', type=int, default=default_sigma, help='Fixed noise level for the varying iterations plot.')
     parser.add_argument('--fixed-iter', type=int, default=None, help='Fixed iteration depth for varying noise plot (defaults to checkpoint value).')
     
     # Target value sequences
