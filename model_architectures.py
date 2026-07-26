@@ -17,7 +17,6 @@ from utils import *
 
 
 
-
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class AlgoParams:
@@ -218,33 +217,6 @@ class LSC_denoiser(nn.Module):
 # Feature extraction and reconstruction modules for RNN, Conv, and Transformer denoisers
 # ==================================================================================================
 
-class ExpComp_Module(nn.Module):
-    def __init__(self, in_ch, kernel_dim=5):
-        super().__init__()
-
-        self.conv_layer = nn.Sequential(
-            nn.Conv2d(in_ch, 4*in_ch, kernel_size=kernel_dim, bias=False, padding='same', padding_mode='replicate'),
-            nn.ReLU(),
-            nn.Conv2d(4*in_ch, in_ch, kernel_size=1, bias=False)
-        )
-
-    def forward(self, x):        
-        return self.conv_layer(x)
-
-
-class ExpComp_Block(nn.Module):
-    def __init__(self, in_ch, kernel_dim=5, num_modules=5):
-        super().__init__()
-
-        self.expcomp_modules = nn.ModuleList([
-            ExpComp_Module(in_ch, kernel_dim) for _ in range(num_modules)
-        ])
-
-    def forward(self, x):
-        for module in self.expcomp_modules:
-            x = module(x)
-        return x
-    
 
 class Depth_Sep_Conv(nn.Module):
     def __init__(self, token_dim=128, kernel_dim=5):
@@ -272,20 +244,22 @@ class Depth_Sep_Conv_Block(nn.Module):
         return x
 
 
-class Conv_Feature_Extraction(nn.Module):
+class Conv_Patch_Feature_Extraction(nn.Module):
     def __init__(self, kernel_dim=7, token_dim=128, num_modules=3, color_ch=3):
         super().__init__()
 
-        self.token_dim = token_dim
+        self.patch_dim = kernel_dim
 
         self.analysis_op = nn.Sequential(
-            nn.Conv2d(color_ch, 4*token_dim, kernel_size=kernel_dim, bias=False, padding='same', padding_mode='replicate'),
-            nn.Conv2d(4*token_dim, 8, kernel_size=1, bias=False),
-            ExpComp_Block(in_ch=8, kernel_dim=kernel_dim, num_modules=num_modules),
-            nn.Conv2d(8, token_dim, kernel_size=1, bias=False)
+            nn.Conv2d(color_ch* kernel_dim**2, token_dim, kernel_size=1, bias=False), nn.ReLU(),
+            Depth_Sep_Conv_Block(token_dim=token_dim, kernel_dim=5, num_modules=num_modules)
         )
 
     def forward(self, x):
+        B, C, H, W = x.size()
+        x = F.unfold(x, kernel_size=self.patch_dim, padding=self.patch_dim//2, stride=1)  # Shape: (batch_size, channels*patch_dim^2, num_patches)
+        x = x.view(B, -1, H, W)  # Reshape to (batch_size, channels*patch_dim^2, H, W)
+
         x = self.analysis_op(x)
         return x
 
@@ -313,20 +287,6 @@ class Conv_Patch_Reconstruction(nn.Module):
 
         return x
     
-class Fully_Conv_Reconstruction(nn.Module):
-    def __init__(self, kernel_dim=7, token_dim=128, num_modules=3, color_ch=3):
-        super().__init__()
-
-        self.synthesis_op = nn.Sequential(
-            Depth_Sep_Conv_Block(token_dim=token_dim, kernel_dim=kernel_dim, num_modules=num_modules),
-            nn.Conv2d(token_dim, 4*token_dim, kernel_size=1, bias=False),
-            nn.Conv2d(4*token_dim, color_ch, kernel_size=1, bias=False)
-        )
-
-    def forward(self, x):
-        x = self.synthesis_op(x)
-        return x
-
 
 
 # ==================================================================================================
@@ -338,12 +298,12 @@ class Denoising_filter(nn.Module):
         super().__init__()
 
         self.mlp = nn.Sequential(
-            nn.Conv2d(token_dim, 16, kernel_size=1, bias=False),
-            nn.Conv2d(16, token_dim, kernel_size=1, bias=False)
+            nn.Conv2d(token_dim, 32, kernel_size=1, bias=False),
+            nn.Conv2d(32, token_dim, kernel_size=1, bias=False)
         )
 
         self.mixer = nn.Sequential(
-            nn.Conv2d(token_dim, token_dim, kernel_size=9, bias=False, padding='same', padding_mode='replicate', groups=token_dim)
+            nn.Conv2d(token_dim, token_dim, kernel_size=5, bias=False, padding='same', padding_mode='replicate', groups=token_dim)
         )
 
     def forward(self, x):
@@ -410,9 +370,9 @@ class RNN_denoiser(nn.Module):
         self.patch_dim = patch_dim
         self.token_dim = token_dim
 
-        self.feature_extractor = Conv_Feature_Extraction(kernel_dim=self.patch_dim, token_dim=self.token_dim, num_modules=1, color_ch=self.color_ch)
+        self.feature_extractor = Conv_Patch_Feature_Extraction(kernel_dim=self.patch_dim, token_dim=self.token_dim, num_modules=0, color_ch=self.color_ch)
         self.rnn = Denoising_RNN_Block(train_iter=train_iter, token_dim=self.token_dim)
-        self.reconstructor = Conv_Patch_Reconstruction(patch_dim=self.patch_dim, token_dim=self.token_dim, num_modules=1, color_ch=self.color_ch)
+        self.reconstructor = Conv_Patch_Reconstruction(patch_dim=self.patch_dim, token_dim=self.token_dim, num_modules=0, color_ch=self.color_ch)
 
     def forward(self, x, algo_params: AlgoParams):
         x = self.feature_extractor(x)
@@ -423,7 +383,7 @@ class RNN_denoiser(nn.Module):
 
 
 # ==================================================================================================
-# Transformer modules for IMgae denoising
+# Transformer modules for Image denoising
 # ==================================================================================================
 
     
@@ -491,7 +451,7 @@ class MHA_Vision_Transformer_module(nn.Module):
             nn.Conv2d(ch_dimensions[0], ch_dimensions[3], kernel_size=1, bias=False),
             nn.Conv2d(ch_dimensions[3], ch_dimensions[0], kernel_size=1, bias=False)
         )
-        
+
         self.pixel_shuffle_factor = pixel_shuffle_factor
 
         self.MH_Attention_module = Vision_Multi_Head_Attention(token_dim=ch_dimensions[0]*pixel_shuffle_factor**2, att_emb_dim=ch_dimensions[1], att_out_dim=ch_dimensions[2], num_att_heads=num_att_heads)
@@ -548,20 +508,84 @@ class MHA_Vision_Transformer_Denoiser(nn.Module):
         self.patch_dim, self.token_dim, self.att_emb_dim, self.att_out_dim, self.mlp_middle_dim = dim_list
         
 
-        self.feature_extractor = Conv_Feature_Extraction(kernel_dim=self.patch_dim, token_dim=self.token_dim, num_modules=1, color_ch=self.color_ch)
-        self.Transformer_block = MHA_Vision_Transformer_Block(ch_dimensions=dim_list[1:], num_att_heads=num_att_heads, pixel_shuffle_factor = pixel_shuffle_factor, num_modules=num_modules)
+        self.feature_extractor = Conv_Patch_Feature_Extraction(kernel_dim=self.patch_dim, token_dim=self.token_dim, num_modules=1, color_ch=self.color_ch)
+        self.Transformer_refinement_block = MHA_Vision_Transformer_Block(ch_dimensions=dim_list[1:], num_att_heads=num_att_heads, pixel_shuffle_factor = pixel_shuffle_factor, num_modules=num_modules)
         self.reconstructor = Conv_Patch_Reconstruction(patch_dim=self.patch_dim, token_dim=self.token_dim, num_modules=1, color_ch=self.color_ch)
 
     def forward(self, x):
         x = self.feature_extractor(x)
-        x = self.Transformer_block(x)
+        x = self.Transformer_refinement_block(x)
         x = self.reconstructor(x)
         return x
+
+
 
 
 # =============================================================================================================================
 # Convolutional modules for denoising
 # =============================================================================================================================
+
+
+class ExpComp_Module(nn.Module):
+    def __init__(self, in_ch, kernel_dim=5):
+        super().__init__()
+
+        self.conv_layer = nn.Sequential(
+            nn.Conv2d(in_ch, 4*in_ch, kernel_size=kernel_dim, bias=False, padding='same', padding_mode='replicate'),
+            nn.ReLU(),
+            nn.Conv2d(4*in_ch, in_ch, kernel_size=1, bias=False)
+        )
+
+    def forward(self, x):        
+        return self.conv_layer(x)
+
+
+class ExpComp_Block(nn.Module):
+    def __init__(self, in_ch, kernel_dim=5, num_modules=5):
+        super().__init__()
+
+        self.expcomp_modules = nn.ModuleList([
+            ExpComp_Module(in_ch, kernel_dim) for _ in range(num_modules)
+        ])
+
+    def forward(self, x):
+        for module in self.expcomp_modules:
+            x = module(x)
+        return x
+
+
+class Fully_Conv_Feature_Extraction(nn.Module):
+    def __init__(self, kernel_dim=7, token_dim=128, num_modules=3, color_ch=3):
+        super().__init__()
+
+        self.token_dim = token_dim
+
+        self.analysis_op = nn.Sequential(
+            nn.Conv2d(color_ch, 4*token_dim, kernel_size=kernel_dim, bias=False, padding='same', padding_mode='replicate'),
+            nn.Conv2d(4*token_dim, 8, kernel_size=1, bias=False),
+            ExpComp_Block(in_ch=8, kernel_dim=kernel_dim, num_modules=num_modules),
+            nn.Conv2d(8, token_dim, kernel_size=1, bias=False)
+        )
+
+    def forward(self, x):
+        x = self.analysis_op(x)
+        return x
+    
+
+class Fully_Conv_Reconstruction(nn.Module):
+    def __init__(self, kernel_dim=7, token_dim=128, num_modules=3, color_ch=3):
+        super().__init__()
+
+        self.synthesis_op = nn.Sequential(
+            Depth_Sep_Conv_Block(token_dim=token_dim, kernel_dim=kernel_dim, num_modules=num_modules),
+            nn.Conv2d(token_dim, 4*token_dim, kernel_size=1, bias=False),
+            nn.Conv2d(4*token_dim, color_ch, kernel_size=1, bias=False)
+        )
+
+    def forward(self, x):
+        x = self.synthesis_op(x)
+        return x
+
 
 class Conv_Refinement_Module(nn.Module):
     def __init__(self, token_dim):
@@ -577,7 +601,8 @@ class Conv_Refinement_Module(nn.Module):
     def forward(self, x):
         x = self.conv_module(x)
         return x
-    
+
+
 class Conv_Refinement_Block(nn.Module):
     def __init__(self, token_dim, num_modules):
         super().__init__()
@@ -594,7 +619,8 @@ class Conv_Refinement_Block(nn.Module):
             for _ in range(num_iter):
                 x = x + module(xin - x)
         return x + mean
-    
+
+
 class Fully_Conv_Denoiser(nn.Module):
     def __init__(self, dim_list, num_modules=3, im_color: str = 'color'):
         super().__init__()
@@ -602,7 +628,7 @@ class Fully_Conv_Denoiser(nn.Module):
         self.color_ch = 3 if im_color == 'color' else 1
         self.patch_dim, self.token_dim = dim_list
         
-        self.feature_extractor = Conv_Feature_Extraction(kernel_dim=self.patch_dim, token_dim=self.token_dim, num_modules=2, color_ch=self.color_ch)
+        self.feature_extractor = Fully_Conv_Feature_Extraction(kernel_dim=self.patch_dim, token_dim=self.token_dim, num_modules=2, color_ch=self.color_ch)
         self.refinement_block  = Conv_Refinement_Block(token_dim=self.token_dim, num_modules=num_modules)
         self.reconstructor     = Fully_Conv_Reconstruction(kernel_dim=self.patch_dim, token_dim=self.token_dim, num_modules=2, color_ch=self.color_ch)
 

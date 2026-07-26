@@ -57,7 +57,7 @@ denoiser_learning_mode = 'im_out'
 # denoiser_learning_mode = 'noise_out'
 
 # initialize model from a pre-learned model
-pre_learned_init = True  # False or True
+pre_learned_init = False  # False or True
 
 train_transform = PairedSpatialTransform(patch_size)
 train_loader = im_denoising_dataloader(image_dir=TRAIN_PATH, batch_size=batch_size, transform = train_transform, sigma_range=sigma_range, im_color=im_color)
@@ -191,15 +191,15 @@ if __name__ == '__main__':
         print(f"Using device: {device}")
 
         # define denoiser type
-        denoiser_type = 'conv' # 'conv', 'transformer'
+        denoiser_type = 'transformer'  # types: 'conv', 'transformer'
     
         # define the model to be trained
         patch_dim = 7
-        token_dim = 16
-        num_modules = 8
+        token_dim = 64 # 16 for conv
+        num_modules = 5
 
         att_emb_dim = 4
-        att_out_dim = 16
+        att_out_dim = 8
         mlp_middle_dim = att_out_dim
         num_att_heads = 1
         pixel_shuffle_factor = 3

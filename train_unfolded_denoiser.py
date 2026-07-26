@@ -272,12 +272,12 @@ if __name__ == '__main__':
         device = torch.device('mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Using device: {device}")
 
-        token_dim = 256
+        token_dim = 128
         patch_dim = 7
         train_iter = 3
 
         algo_params = AlgoParams(
-            denoiser_type = 'lsc', # options = 'lsc', 'rnn'
+            denoiser_type = 'rnn', # options = 'lsc', 'rnn'
             algo='new_ISTA', # options = 'FLIPS', 'ISTA' 
             num_iter=train_iter,
             activation='leaky_relu',  # 'relu',
