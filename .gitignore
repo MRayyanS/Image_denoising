@@ -10,10 +10,9 @@ myenv/
 
 
 # Data and local outputs (adjust names as needed)
-datasets/
-eval_results/
-other utility function/
+data/
 training_plots/
+old folders/
 
 # specific files
 training_log.txt
