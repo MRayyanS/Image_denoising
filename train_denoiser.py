@@ -35,7 +35,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 # ============================================================================
 # Essential global variables
 # ============================================================================
-seed = 10000000
+seed = 100
 np.random.seed(seed)
 torch.manual_seed(seed)
 device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
@@ -58,7 +58,7 @@ TEST_PATH  = 'data/Set12/Set12_256'
 # Set some hyperpaprameters
 batch_size = 1
 im_size = 128
-sigma_range = [15,15.1]
+sigma_range = [50,50.1]
 im_color = 'gray' # 'color' or 'gray'
 
 
@@ -68,7 +68,7 @@ pre_learned_init = 'model_params'  # 'everything' , 'model_params' , 'none'
 train_transform = PairedSpatialTransform(im_size)
 train_loader = im_denoising_dataloader(image_dir=TRAIN_PATH, batch_size=batch_size, transform = train_transform, sigma_range=sigma_range, im_color=im_color)
 
-val_sigma_range = [15,15.1]
+val_sigma_range = [50,50.1]
 val_transform = transforms.ToTensor()
 val_loader  = im_denoising_dataloader(image_dir=VAL_PATH, batch_size=1, transform = val_transform, sigma_range=val_sigma_range, im_color=im_color)
 test_loader = im_denoising_dataloader(image_dir=TEST_PATH, batch_size=1, transform = val_transform, sigma_range=val_sigma_range, im_color=im_color)
@@ -287,8 +287,8 @@ if __name__ == '__main__':
                 'patch_dim': 7,
                 'token_dim': 64,
                 'low_emb_dim': 16,
-                'num_modules': 4,
-                'train_iter': 3,
+                'num_modules': 3,
+                'train_iter': 5,
             }
 
             # load attributes from previous checkpoint if needed
@@ -465,7 +465,7 @@ if __name__ == '__main__':
         print(f"✓ Batch size: {batch_size}, Training batches per epoch: {len(train_loader)}, Total images:{len(train_loader)*batch_size}")
         
         num_epochs = 150
-        learning_rate = 0.0005   #0.00125
+        learning_rate = 0.000125   #0.00125
         
         optimizer = optim.AdamW(training_model.parameters(), lr=learning_rate, weight_decay=1e-6)
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=5e-5)

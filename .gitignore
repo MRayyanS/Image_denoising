@@ -12,9 +12,15 @@ myenv/
 # Data and local outputs (adjust names as needed)
 data/
 old folders/
+plots_and_images/
+training_results/Trash/
+
+
 
 # specific files
 training_log.txt
 last_model_trained.pth
+last_training_results.pth
+trained_model_summary.md
 
 
