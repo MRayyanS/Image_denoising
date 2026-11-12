@@ -35,7 +35,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 # ============================================================================
 # Essential global variables
 # ============================================================================
-seed = 100
+seed = 1000000000
 np.random.seed(seed)
 torch.manual_seed(seed)
 device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
@@ -58,7 +58,7 @@ TEST_PATH  = 'data/Set12/Set12_256'
 # Set some hyperpaprameters
 batch_size = 1
 im_size = 128
-sigma_range = [50,50.1]
+sigma_range = [25,25.1]
 im_color = 'gray' # 'color' or 'gray'
 
 
@@ -68,7 +68,7 @@ pre_learned_init = 'model_params'  # 'everything' , 'model_params' , 'none'
 train_transform = PairedSpatialTransform(im_size)
 train_loader = im_denoising_dataloader(image_dir=TRAIN_PATH, batch_size=batch_size, transform = train_transform, sigma_range=sigma_range, im_color=im_color)
 
-val_sigma_range = [50,50.1]
+val_sigma_range = [25,25.1]
 val_transform = transforms.ToTensor()
 val_loader  = im_denoising_dataloader(image_dir=VAL_PATH, batch_size=1, transform = val_transform, sigma_range=val_sigma_range, im_color=im_color)
 test_loader = im_denoising_dataloader(image_dir=TEST_PATH, batch_size=1, transform = val_transform, sigma_range=val_sigma_range, im_color=im_color)
@@ -249,7 +249,7 @@ if __name__ == '__main__':
 
 
         # define denoiser type
-        denoiser_type = 'conv'   # types: 'conv', 'transformer', 'BLT', 'UNet', 'MHTA_transformer', 'tinkering'
+        denoiser_type = 'MHTA_transformer'   # types: 'conv', 'transformer', 'BLT', 'UNet', 'MHTA_transformer', 'tinkering'
 
         
         if denoiser_type == 'lsc':
@@ -403,13 +403,13 @@ if __name__ == '__main__':
             'patch_dim': 7,
             'tensor_dim': [64, im_size, im_size],
 
-            'num_modules': 1,
-            'train_iter': 1,
+            'num_modules': 3,
+            'train_iter': 5,
         
-            'att_emb_dim': [32, 32],
+            'att_emb_dim': [16, 16],
             'pixel_shuffle_factor': 4,
             'num_att_heads': 1, 
-            'conv_emb_dim': 32
+            'conv_emb_dim': 16
             }
 
             # load attributes from previous checkpoint if needed
@@ -432,10 +432,10 @@ if __name__ == '__main__':
 
                 'patch_dim': 7,
                 'token_dim_list': [64, im_size, im_size],  # token_dim_list[0] is the number of channels
-                'transform_dim_list': [24, 32, 32],
+                'transform_dim_list': [16, 32, 32],
                 
                 'num_modules': 3,
-                'train_iter': 1,
+                'train_iter': 5,
 
                 'pixel_shuffle_factor': 2,
                 'large_context_type': 'BLT_attention',   # 'BLT_conv', 'BLT_attention'
@@ -454,18 +454,12 @@ if __name__ == '__main__':
         # count and print the number of parameters
         count_parameters(training_model)
 
-        # define loss criterion to train the model
-        # criterion = nn.MSELoss()
-        criterion = L1L2Loss(regularizer=0.25)
-
-        # criterion = SSIMLoss(window_size=11, sigma=1.5, channel=1)
-
         # printing some basic info
         print(f'Starting training... using device: {device}')
         print(f"✓ Batch size: {batch_size}, Training batches per epoch: {len(train_loader)}, Total images:{len(train_loader)*batch_size}")
         
-        num_epochs = 150
-        learning_rate = 0.000125   #0.00125
+        num_epochs = 250
+        learning_rate = 0.0005   #0.00125
         
         optimizer = optim.AdamW(training_model.parameters(), lr=learning_rate, weight_decay=1e-6)
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=5e-5)
@@ -479,6 +473,11 @@ if __name__ == '__main__':
         best_model_state_dict = copy.deepcopy(training_model.state_dict())
         
         for epoch in range(num_epochs):
+
+            # define loss criterion to train the model
+            reg = 0.5  # 20 / (20 + epoch)
+            criterion = L1L2Loss(regularizer=reg)  # loss = l1 + regularizer * MSE
+            
             # 1. Train the model - and update the train loss and confusion matrix
             train(training_model, epoch, train_loss_history)
 

@@ -479,7 +479,7 @@ def visualise_denoiser_performance(model, image_tuple, noise_sigma, device, outp
 
 from prettytable import PrettyTable
 
-def count_parameters(model):
+def count_parameters(model, print_arch=True):
     table = PrettyTable(["Modules", "Parameters"])
     total_params = 0
     for name, parameter in model.named_parameters():
@@ -488,7 +488,7 @@ def count_parameters(model):
         params = parameter.numel()
         table.add_row([name, params])
         total_params += params
-    print(table)
+    print(table) if print_arch == True else None
     print(f"Total Trainable Params: {total_params}")
     return total_params
 

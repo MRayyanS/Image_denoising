@@ -1472,8 +1472,6 @@ class SingleHead_Transposed_Attention(nn.Module):
 
         self.temperature = nn.Parameter(torch.randn(1))
 
-        # self.token_to_emb_transform = bilinear_transform(in_dim=self.token_dim, out_dim=self.att_emb_dim)
-        # self.emb_to_token_transform = bilinear_transform(in_dim = self.att_emb_dim, out_dim=self.token_dim)
 
     def forward(self, x):
 
@@ -1826,7 +1824,7 @@ class Temp_Denoiser(nn.Module):
         self.reconstructor     = nn.Sequential(
             nn.Conv2d(self.token_dim_list[0], 2*self.token_dim_list[0], kernel_size=1, bias=False),
             nn.ReLU(),
-            nn.Conv2d(2*self.token_dim_list[0], self.color_ch, kernel_size=5, bias=False, padding='same', padding_mode='replicate')
+            nn.Conv2d(2*self.token_dim_list[0], self.color_ch, kernel_size=3, bias=False, padding='same', padding_mode='replicate')
         )
 
 
