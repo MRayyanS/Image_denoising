@@ -35,7 +35,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 # ============================================================================
 # Essential global variables
 # ============================================================================
-seed = 1000000000
+seed = 10000000
 np.random.seed(seed)
 torch.manual_seed(seed)
 device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
@@ -58,7 +58,7 @@ TEST_PATH  = 'data/Set12/Set12_256'
 # Set some hyperpaprameters
 batch_size = 1
 im_size = 128
-sigma_range = [25,25.1]
+sigma_range = [15,15.1]
 im_color = 'gray' # 'color' or 'gray'
 
 
@@ -68,7 +68,7 @@ pre_learned_init = 'model_params'  # 'everything' , 'model_params' , 'none'
 train_transform = PairedSpatialTransform(im_size)
 train_loader = im_denoising_dataloader(image_dir=TRAIN_PATH, batch_size=batch_size, transform = train_transform, sigma_range=sigma_range, im_color=im_color)
 
-val_sigma_range = [25,25.1]
+val_sigma_range = [15,15.1]
 val_transform = transforms.ToTensor()
 val_loader  = im_denoising_dataloader(image_dir=VAL_PATH, batch_size=1, transform = val_transform, sigma_range=val_sigma_range, im_color=im_color)
 test_loader = im_denoising_dataloader(image_dir=TEST_PATH, batch_size=1, transform = val_transform, sigma_range=val_sigma_range, im_color=im_color)
@@ -249,7 +249,7 @@ if __name__ == '__main__':
 
 
         # define denoiser type
-        denoiser_type = 'MHTA_transformer'   # types: 'conv', 'transformer', 'BLT', 'UNet', 'MHTA_transformer', 'tinkering'
+        denoiser_type = 'transformer'   # types: 'conv', 'transformer', 'BLT', 'UNet', 'MHTA_transformer', 'tinkering'
 
         
         if denoiser_type == 'lsc':
@@ -304,7 +304,7 @@ if __name__ == '__main__':
         elif denoiser_type == 'transformer':
             
             token_dim = 64
-            attention_type = 'spatial' # 'spatial', 'channel'
+            attention_type = 'channel' # 'spatial', 'channel'
         
             attention_config = {
                 'att_emb_dim': 16,
